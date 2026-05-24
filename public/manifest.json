@@ -1,0 +1,22 @@
+{
+  "name": "OneStep Athletics",
+  "short_name": "OneStep",
+  "description": "선수 관리, 훈련 추적, 퍼포먼스 최적화를 위한 러닝 코칭 앱",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141414",
+  "theme_color": "#141414",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
