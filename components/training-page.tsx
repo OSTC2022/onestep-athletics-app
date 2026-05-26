@@ -5,7 +5,6 @@ import {
   Calendar,
   ChevronLeft,
   ChevronRight,
-  Clock,
   Activity,
   AlertCircle,
   Thermometer,
@@ -40,9 +39,24 @@ import {
 } from "@/lib/weekly-schedule"
 import { parseRaceDate } from "@/lib/race-schedule"
 import { formatKoreanDateWithWeekday } from "@/lib/date-format"
+import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { TrainingSessionDetailView } from "@/components/training-session-detail-view"
+import { useCanManageTraining } from "@/hooks/useCurrentUser"
+import { useTodayTrainingSession } from "@/hooks/use-training-session"
+import { createEmptyTrainingSession, loadAllTrainingSessions } from "@/lib/training-session"
+import { useEffect } from "react"
 import { cn } from "@/lib/utils"
 
 export function TrainingPage() {
+  const router = useRouter()
+  const todaySession = useTodayTrainingSession()
+  const canManage = useCanManageTraining()
+
+  useEffect(() => {
+    loadAllTrainingSessions()
+  }, [])
+
   const [condition, setCondition] = useState<number | null>(null)
   const [painAreas, setPainAreas] = useState<string[]>([])
   const [painDetail, setPainDetail] = useState("")
@@ -127,12 +141,28 @@ export function TrainingPage() {
   return (
     <div className="px-4 py-6 space-y-4">
       {/* Header */}
-      <header className="flex items-center justify-between">
+      <header className="flex items-center justify-between gap-2">
         <h1 className="text-2xl font-bold tracking-tight">훈련</h1>
-        <Badge variant="outline" className="text-accent border-accent">
-          <Calendar className="h-3 w-3 mr-1" />
-          {formatKoreanDateWithWeekday()}
-        </Badge>
+        <div className="flex items-center gap-2 shrink-0">
+          {canManage && (
+            <Button
+              type="button"
+              size="sm"
+              className="h-8 px-2.5 text-[12px] bg-accent text-accent-foreground hover:bg-accent/90"
+              onClick={() => {
+                const created = createEmptyTrainingSession()
+                router.push(`/training/edit/${created.id}`)
+              }}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1" />
+              훈련 추가
+            </Button>
+          )}
+          <Badge variant="outline" className="text-accent border-accent">
+            <Calendar className="h-3 w-3 mr-1" />
+            {formatKoreanDateWithWeekday()}
+          </Badge>
+        </div>
       </header>
 
       {/* Weekly Schedule */}
@@ -423,31 +453,53 @@ export function TrainingPage() {
       </Dialog>
 
       {/* Today's Detail */}
-      <Card className="bg-card border-border">
-        <CardHeader className="pb-2">
-          <div className="flex items-center gap-2">
-            <Clock className="h-4 w-4 text-accent" />
-            <CardTitle className="text-base">오늘의 훈련 상세</CardTitle>
+      {todaySession ? (
+        <div className="space-y-2">
+          <TrainingSessionDetailView
+            session={todaySession}
+            showEditLink={false}
+            embedded
+          />
+          <div className="flex gap-2">
+            <Button
+              asChild
+              variant="outline"
+              className={cn(
+                "border-accent/40 text-accent hover:bg-accent/10",
+                canManage ? "flex-1" : "w-full"
+              )}
+            >
+              <Link href={`/training/${todaySession.id}`}>상세 보기</Link>
+            </Button>
+            {canManage && (
+              <Button
+                asChild
+                className="flex-1 bg-accent text-accent-foreground hover:bg-accent/90"
+              >
+                <Link href={`/training/edit/${todaySession.id}`}>수정</Link>
+              </Button>
+            )}
           </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="p-3 bg-secondary rounded-lg">
-            <div className="flex items-center justify-between mb-2">
-              <span className="font-medium">템포런 10km</span>
-              <Badge variant="outline">목표 페이스: 4:30/km</Badge>
-            </div>
-            <div className="space-y-1 text-sm text-muted-foreground">
-              <p>• 웜업: 조깅 2km</p>
-              <p>• 메인: 템포런 6km (목표 페이스 유지)</p>
-              <p>• 쿨다운: 조깅 2km</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <AlertCircle className="h-4 w-4" />
-            <span>심박수 존 3-4 유지, 마지막 1km는 존 4-5까지 올려도 됩니다.</span>
-          </div>
-        </CardContent>
-      </Card>
+        </div>
+      ) : (
+        <Card className="bg-card border-border">
+          <CardContent className="p-4 text-center space-y-3">
+            <p className="text-sm text-muted-foreground">오늘 등록된 훈련이 없습니다</p>
+            {canManage && (
+              <Button
+                type="button"
+                className="bg-accent text-accent-foreground hover:bg-accent/90"
+                onClick={() => {
+                  const created = createEmptyTrainingSession()
+                  router.push(`/training/edit/${created.id}`)
+                }}
+              >
+                훈련 추가
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

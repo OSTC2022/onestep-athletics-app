@@ -2,12 +2,13 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Home, Dumbbell, Trophy, Users, BarChart3 } from "lucide-react"
+import { Home, Dumbbell, Trophy, Users, BarChart3, Apple } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const navItems = [
   { href: "/", icon: Home, label: "홈" },
   { href: "/training", icon: Dumbbell, label: "훈련" },
+  { href: "/nutrition", icon: Apple, label: "영양관리" },
   { href: "/athletes", icon: Users, label: "선수" },
   { href: "/report", icon: BarChart3, label: "리포트" },
   { href: "/competitions", icon: Trophy, label: "대회" },

@@ -5,6 +5,8 @@ export interface TrainingLocation {
   address: string
   /** 네이버 지도 검색어 (미입력 시 address 사용) */
   mapQuery?: string
+  lat?: number
+  lng?: number
 }
 
 export interface WeeklyScheduleDay {
@@ -178,7 +180,11 @@ export function getNaverMapSearchUrl(query: string): string {
 }
 
 export function getScheduleMapQuery(location: TrainingLocation): string {
-  return location.mapQuery?.trim() || location.address
+  const address = location.address?.trim()
+  if (address) return address
+  const mapQuery = location.mapQuery?.trim()
+  if (mapQuery) return mapQuery
+  return location.name.trim()
 }
 
 export function openNaverMap(location: TrainingLocation): void {
