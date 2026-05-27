@@ -35,8 +35,8 @@ const STORAGE_KEY = "one-step-coach-home-layout"
 
 export const HOME_WIDGET_IDS: HomeWidgetId[] = [
   "training",
-  "pace-calculator",
   "weight-progress",
+  "pace-calculator",
   "quick-actions",
   "garmin-stats",
   "attendance-stats",
@@ -132,18 +132,35 @@ function normalizeWidget(raw: unknown, index: number): HomeWidgetItem | null {
   }
 }
 
+function swapWeightProgressAbovePaceCalculator(
+  layout: HomeLayout
+): HomeLayout {
+  const pace = layout.widgets.find((w) => w.id === "pace-calculator")
+  const weight = layout.widgets.find((w) => w.id === "weight-progress")
+  if (!pace || !weight || pace.order >= weight.order) return layout
+
+  return {
+    widgets: layout.widgets.map((w) => {
+      if (w.id === "pace-calculator") return { ...w, order: weight.order }
+      if (w.id === "weight-progress") return { ...w, order: pace.order }
+      return w
+    }),
+  }
+}
+
 function mergeWithDefaults(parsed: HomeLayout): HomeLayout {
   const byId = new Map<HomeWidgetId, HomeWidgetItem>()
   for (const w of parsed.widgets) {
     byId.set(w.id, w)
   }
-  return {
+  const merged: HomeLayout = {
     widgets: HOME_WIDGET_IDS.map((id, index) => {
       const existing = byId.get(id)
       if (existing) return { ...existing, id }
       return DEFAULT_HOME_LAYOUT.widgets[index]
     }).sort((a, b) => a.order - b.order),
   }
+  return swapWeightProgressAbovePaceCalculator(merged)
 }
 
 export function loadHomeLayout(): HomeLayout {

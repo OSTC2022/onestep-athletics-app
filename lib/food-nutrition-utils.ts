@@ -1,4 +1,5 @@
 import type { FoodDatabaseItem } from "@/lib/food-database"
+import type { MacroTargets } from "@/lib/user-profile"
 
 export type LoggedNutrition = {
   calories: number
@@ -154,6 +155,34 @@ export function validateMacroCalories(
 export function nutritionPercent(actual: number, target: number): number {
   if (!target || target <= 0) return 0
   return Math.min(100, Math.round((actual / target) * 100))
+}
+
+export function nutritionFulfillmentPercent(actual: number, target: number): number {
+  if (!target || target <= 0) return 0
+  return Math.round((actual / target) * 100)
+}
+
+function lerpColor(a: number, b: number, t: number): number {
+  return a + (b - a) * Math.max(0, Math.min(1, t))
+}
+
+/** 충족률 0→100%: 회색→초록, 초과 시 초록→빨강 (퍼센트 텍스트용) */
+export function getNutritionPercentColor(fulfillmentPct: number): string {
+  const pct = Math.max(0, fulfillmentPct)
+
+  if (pct <= 100) {
+    const t = pct / 100
+    const h = lerpColor(220, 142, t)
+    const s = lerpColor(8, 65, t)
+    const l = lerpColor(42, 42, t)
+    return `hsl(${h}, ${s}%, ${l}%)`
+  }
+
+  const t = Math.min(1, (pct - 100) / 80)
+  const h = lerpColor(142, 0, t)
+  const s = lerpColor(65, 72, t)
+  const l = lerpColor(42, 52, t)
+  return `hsl(${h}, ${s}%, ${l}%)`
 }
 
 export type DietJudgmentTone = "ok" | "warn" | "caution" | "neutral"
@@ -332,6 +361,59 @@ export function buildNutritionFeedbacks(
   }
 
   return [...new Set(messages)]
+}
+
+export function buildTodayNutritionCheckpoints(
+  totals: NutritionTotals,
+  targets: Pick<
+    MacroTargets,
+    "calories" | "carbsG" | "proteinG" | "fatG" | "waterL" | "sugarG" | "sodiumMg"
+  >,
+  options?: { waterConsumedL?: number }
+): string[] {
+  const checkpoints: string[] = []
+  const proteinPct = nutritionPercent(totals.proteinG, targets.proteinG)
+  const carbsPct = nutritionPercent(totals.carbsG, targets.carbsG)
+  const fatPct = nutritionPercent(totals.fatG, targets.fatG)
+  const sugarPct = nutritionPercent(totals.sugarG, targets.sugarG)
+  const sodiumPct = nutritionPercent(totals.sodiumMg, targets.sodiumMg)
+  const waterConsumedL = options?.waterConsumedL ?? 0
+  const waterPct = nutritionPercent(waterConsumedL, targets.waterL)
+  const hasIntake = totals.count > 0 && totals.calories > 0
+
+  if (hasIntake && proteinPct < 70) {
+    checkpoints.push("단백질이 부족해요.")
+  }
+
+  if (hasIntake && carbsPct > 110) {
+    checkpoints.push("탄수화물이 목표보다 많아요.")
+  } else if (hasIntake && carbsPct < 50) {
+    checkpoints.push("탄수화물이 부족해요.")
+  }
+
+  if (hasIntake && fatPct > 110) {
+    checkpoints.push("지방 섭취가 높은 편이에요.")
+  }
+
+  if (hasIntake && sugarPct >= 80) {
+    checkpoints.push("당류 섭취에 주의하세요.")
+  }
+
+  if (hasIntake && sodiumPct >= 80 && sodiumPct <= 110) {
+    checkpoints.push("나트륨은 목표에 가까워요.")
+  } else if (hasIntake && sodiumPct > 110) {
+    checkpoints.push("나트륨이 목표를 넘었어요.")
+  }
+
+  if (waterPct < 70) {
+    checkpoints.push("수분을 더 마셔주세요.")
+  }
+
+  if (!hasIntake && checkpoints.length === 0) {
+    return []
+  }
+
+  return checkpoints.slice(0, 5)
 }
 
 export function formatMacroG(value: number): string {

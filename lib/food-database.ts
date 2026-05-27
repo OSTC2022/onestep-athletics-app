@@ -5,6 +5,7 @@ import { getFiberPer100g, toLoggedNutrition } from "@/lib/food-nutrition-utils"
 import { getFiberSearchResults } from "@/lib/food-recommendations"
 import type { DietWarningContext } from "@/lib/food-nutrition-utils"
 import { loadCustomFoods, searchCustomFoods } from "@/lib/custom-food-store"
+import { applyFoodNutritionOverride } from "@/lib/food-nutrition-overrides"
 
 export { getFiberPer100g } from "@/lib/food-nutrition-utils"
 
@@ -24,8 +25,11 @@ export interface FoodDatabaseItem {
   name: string
   category: string
   aliases?: string[]
-  /** 1회 제공량 참고 (g) */
+  /** '개' 등 count 단위 1회 무게(g) — food_items.piece_weight_g */
+  pieceWeightG?: number
+  /** @deprecated pieceWeightG 사용. 하위 호환용 */
   servingGrams?: number
+  /** count 단위 표시 — 예: 1토막, 1공기, 1컵 */
   servingLabel?: string
   per100g: FoodNutritionPer100g
   /** 정제 탄수화물 정도 (다이어트 평가용) */
@@ -196,18 +200,54 @@ export function searchFoodDatabase(
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score || a.food.name.localeCompare(b.food.name, "ko"))
 
-  return scored.slice(0, limit).map((x) => x.food)
+  return scored.slice(0, limit).map((x) => resolveFoodRecord(x.food))
 }
 
 export function getCustomFoodSearchResults(query: string, limit = 24): FoodDatabaseItem[] {
   return searchCustomFoods(query, limit)
 }
 
-export function getFoodById(id: string): FoodDatabaseItem | undefined {
-  if (typeof window !== "undefined" && id.startsWith("custom-")) {
-    return loadCustomFoods().find((f) => f.id === id) ?? FOODS.find((f) => f.id === id)
+function resolveFoodRecord(food: FoodDatabaseItem): FoodDatabaseItem {
+  const pieceWeightG = food.pieceWeightG ?? food.servingGrams
+  const normalized: FoodDatabaseItem = {
+    ...food,
+    pieceWeightG,
+    servingGrams: pieceWeightG,
   }
-  return FOODS.find((f) => f.id === id) ?? loadCustomFoods().find((f) => f.id === id)
+  if (food.isCustom) return normalized
+  return applyFoodNutritionOverride(normalized)
+}
+
+export function getFoodById(id: string): FoodDatabaseItem | undefined {
+  let food: FoodDatabaseItem | undefined
+  if (typeof window !== "undefined" && id.startsWith("custom-")) {
+    food =
+      loadCustomFoods().find((f) => f.id === id) ?? FOODS.find((f) => f.id === id)
+  } else {
+    food =
+      FOODS.find((f) => f.id === id) ?? loadCustomFoods().find((f) => f.id === id)
+  }
+  return food ? resolveFoodRecord(food) : undefined
+}
+
+/** count 단위(개·토막·공기 등) 1회 무게(g). 없으면 undefined → g 단위만 사용 */
+export function getPieceWeightG(food: FoodDatabaseItem): number | undefined {
+  return food.pieceWeightG ?? food.servingGrams
+}
+
+export function usesPieceUnit(food: FoodDatabaseItem): boolean {
+  return getPieceWeightG(food) != null && getPieceWeightG(food)! > 0
+}
+
+/** servingLabel에서 단위명 추출 — "1공기" → "공기", "1토막" → "토막" */
+export function parseServingUnitFromLabel(servingLabel?: string): string {
+  if (!servingLabel?.trim()) return "회"
+  const withoutNum = servingLabel.trim().replace(/^[\d./]+\s*/, "")
+  return withoutNum || "회"
+}
+
+export function getServingUnit(food: FoodDatabaseItem): string {
+  return parseServingUnitFromLabel(food.servingLabel)
 }
 
 export function getAllCustomFoods(): FoodDatabaseItem[] {
@@ -235,18 +275,15 @@ export function nutritionAtGrams(
 }
 
 export function formatServingHint(food: FoodDatabaseItem, grams: number): string {
-  if (food.servingGrams) {
-    const servings = Math.round((grams / food.servingGrams) * 10) / 10
+  const pieceWeight = getPieceWeightG(food)
+  if (pieceWeight) {
+    const servings = Math.round((grams / pieceWeight) * 10) / 10
     if (servings >= 0.3) {
-      return `${grams}g · 약 ${servings}개`
+      const unit = getServingUnit(food)
+      return `${grams}g · 약 ${servings}${unit}`
     }
   }
   return `${grams}g`
-}
-
-/** servingLabel에서 단위 추출 — 전 음식 1개 기준 */
-export function getServingUnit(_food: FoodDatabaseItem): string {
-  return "개"
 }
 
 export function gramsForServingCount(
@@ -254,28 +291,53 @@ export function gramsForServingCount(
   count: number,
   fallbackUnitGrams: number
 ): number {
-  const unitGrams = food.servingGrams ?? fallbackUnitGrams
+  const unitGrams = getPieceWeightG(food) ?? fallbackUnitGrams
   return Math.round(unitGrams * count)
 }
 
-export function formatServingCountDisplay(
+function formatCountWithUnit(count: number, unit: string): string {
+  const countStr = Number.isInteger(count) ? String(count) : String(count)
+  return `${countStr}${unit}`
+}
+
+/** 섭취량만 — 음식 이름 없음. 예: "2토막 (240g)" 또는 "240g" */
+export function formatPortionAmount(
   food: FoodDatabaseItem,
   count: number,
   fallbackUnitGrams: number
 ): string {
   const grams = gramsForServingCount(food, count, fallbackUnitGrams)
-  if (food.servingGrams) {
-    const countStr = Number.isInteger(count) ? String(count) : String(count)
-    return `${countStr}개 (${grams}g)`
+  const pieceWeight = getPieceWeightG(food)
+  if (pieceWeight) {
+    const unit = getServingUnit(food)
+    return `${formatCountWithUnit(count, unit)} (${grams}g)`
   }
   return `${grams}g`
+}
+
+/** 음식 이름 + 섭취량. 예: "닭가슴살(삶은) · 2토막 (240g)" */
+export function formatFullFoodPortion(
+  food: FoodDatabaseItem,
+  count: number,
+  fallbackUnitGrams: number
+): string {
+  return `${food.name} · ${formatPortionAmount(food, count, fallbackUnitGrams)}`
+}
+
+/** @deprecated formatPortionAmount 또는 formatFullFoodPortion 사용 */
+export function formatServingCountDisplay(
+  food: FoodDatabaseItem,
+  count: number,
+  fallbackUnitGrams: number
+): string {
+  return formatFullFoodPortion(food, count, fallbackUnitGrams)
 }
 
 export function initialServingCount(
   food: FoodDatabaseItem,
   recommendedGrams: number
 ): number {
-  const unitGrams = food.servingGrams ?? recommendedGrams
+  const unitGrams = getPieceWeightG(food) ?? recommendedGrams
   if (unitGrams <= 0) return 1
   const raw = recommendedGrams / unitGrams
   return Math.max(0.5, Math.round(raw * 2) / 2)

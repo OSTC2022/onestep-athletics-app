@@ -217,7 +217,9 @@ export function CustomFoodFormDialog({
               </select>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-[11px] text-muted-foreground">1회 기준량</Label>
+              <Label className="text-[11px] text-muted-foreground">
+                1회 무게 (piece_weight_g)
+              </Label>
               <Input
                 type="number"
                 min={1}
@@ -231,7 +233,9 @@ export function CustomFoodFormDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">1회 표시 (선택)</Label>
+            <Label className="text-[11px] text-muted-foreground">
+              1회 표시 (예: 1토막, 1공기)
+            </Label>
             <Input
               value={form.servingLabel ?? ""}
               onChange={(e) => updateField("servingLabel", e.target.value)}

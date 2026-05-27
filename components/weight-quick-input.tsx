@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Check } from "lucide-react"
+import { Check, Pencil } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { saveCurrentWeight } from "@/lib/nutrition"
 import { cn } from "@/lib/utils"
@@ -85,6 +85,90 @@ export function WeightQuickInput({
         )}
       </button>
     </div>
+  )
+}
+
+export function InlineWeightEdit({
+  currentWeightKg,
+  onSaved,
+  className,
+}: {
+  currentWeightKg: number
+  onSaved?: (weightKg: number) => void
+  className?: string
+}) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(String(currentWeightKg))
+
+  useEffect(() => {
+    setValue(String(currentWeightKg))
+  }, [currentWeightKg])
+
+  const cancel = () => {
+    setValue(String(currentWeightKg))
+    setEditing(false)
+  }
+
+  const commit = () => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      cancel()
+      return
+    }
+    const rounded = Math.round(parsed * 10) / 10
+    if (rounded !== currentWeightKg) {
+      const next = saveCurrentWeight(rounded)
+      setValue(String(next))
+      onSaved?.(next)
+    } else {
+      setValue(String(currentWeightKg))
+    }
+    setEditing(false)
+  }
+
+  if (!editing) {
+    return (
+      <span className={cn("inline-flex items-center gap-0.5", className)}>
+        <span className="text-foreground font-semibold tabular-nums">
+          {currentWeightKg}kg
+        </span>
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="h-5 w-5 flex items-center justify-center shrink-0 rounded hover:bg-white/[0.08] text-muted-foreground hover:text-foreground transition-colors"
+          aria-label="현재 체중 수정"
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+      </span>
+    )
+  }
+
+  return (
+    <span className={cn("inline-flex items-baseline gap-0.5", className)}>
+      <Input
+        type="number"
+        inputMode="decimal"
+        step="0.1"
+        value={value}
+        autoFocus
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault()
+            commit()
+          }
+          if (e.key === "Escape") {
+            e.preventDefault()
+            cancel()
+          }
+        }}
+        className="h-6 w-[3.25rem] px-1 py-0 text-[13px] font-semibold tabular-nums bg-white/[0.06] border-accent/40 rounded-md"
+        aria-label="현재 체중"
+      />
+      <span className="text-foreground font-semibold">kg</span>
+    </span>
   )
 }
 

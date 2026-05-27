@@ -1,12 +1,13 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { RefreshCw } from "lucide-react"
+import { RefreshCw, Undo2 } from "lucide-react"
 import { Progress } from "@/components/ui/progress"
+import { CollapsibleInlineSection } from "@/components/collapsible-card"
+import { MacroRangeLabel } from "@/components/macro-range-label"
 import { formatCalories, type MacroTargets } from "@/lib/user-profile"
 import {
   buildMealSlotTargets,
-  MEAL_CALORIE_RATIO,
   NEXT_MEAL_SLOT,
   type FoodMealSlotId,
   type MealSlotMacroTargets,
@@ -18,10 +19,8 @@ import {
   type MacroEval,
   type MealEvaluationContext,
 } from "@/lib/meal-evaluation"
-import { COACHING_DIET_MODE_OPTIONS } from "@/lib/diet-coaching"
 import {
   buildDietJudgmentSummary,
-  buildNutritionFeedbacks,
   buildDietWarningContext,
   formatMacroG,
   nutritionPercent,
@@ -126,8 +125,8 @@ function ScopeToggle({
     <div className="flex rounded-lg bg-secondary/50 p-0.5 gap-0.5">
       {(
         [
-          { id: "daily" as const, label: "하루 합계" },
-          { id: "perMeal" as const, label: "1끼별" },
+          { id: "daily" as const, label: "오늘 섭취량" },
+          { id: "perMeal" as const, label: "끼니별" },
         ] as const
       ).map((item) => (
         <button
@@ -141,7 +140,14 @@ function ScopeToggle({
               : "text-muted-foreground hover:text-foreground"
           )}
         >
-          {item.label}
+          {item.id === "daily" ? (
+            <span className="block leading-tight text-center">
+              <span className="block">오늘</span>
+              <span className="block">섭취량</span>
+            </span>
+          ) : (
+            item.label
+          )}
         </button>
       ))}
     </div>
@@ -179,18 +185,18 @@ function MacroRow({
 }) {
   const format = formatValue ?? formatMacroG
   const color = macroStatusColor(macro.status)
+  const unitSuffix = unit === "kcal" || unit === "mg" ? ` ${unit}` : unit
 
   return (
     <div className={nested ? "pl-2" : undefined}>
-      <div className="flex justify-between gap-1 text-[10px] tabular-nums">
-        <span className="text-muted-foreground">
+      <div className="flex flex-nowrap justify-between gap-1.5 text-[10px] tabular-nums min-w-0">
+        <span className="text-muted-foreground whitespace-nowrap shrink-0">
           {nested ? "└ " : ""}
           {macro.label}
         </span>
-        <span className={color}>
-          {format(macro.actual)}
-          {unit} / {format(macro.target)}
-          {unit}
+        <span className={cn(color, "whitespace-nowrap shrink-0 text-right")}>
+          {format(macro.actual)} / {format(macro.target)}
+          {unitSuffix}
           {macro.status !== "none" ? (
             <span className="ml-0.5">{macro.statusLabel}</span>
           ) : null}
@@ -213,6 +219,8 @@ function PerMealSummaryCard({
   slotTargets,
   mealEntries,
   coachingContext,
+  undoAvailable = false,
+  onClearOrUndo,
 }: {
   slotId?: FoodMealSlotId
   label: string
@@ -220,6 +228,8 @@ function PerMealSummaryCard({
   slotTargets: MealSlotMacroTargets
   mealEntries: LoggedFoodEntry[]
   coachingContext?: MealEvaluationContext
+  undoAvailable?: boolean
+  onClearOrUndo?: () => void
 }) {
   const nextMeal = slotId ? NEXT_MEAL_SLOT[slotId] : undefined
   const evaluation = useMemo(
@@ -397,6 +407,30 @@ function PerMealSummaryCard({
       ) : (
         <p className="text-[10px] text-muted-foreground">아직 기록이 없어요.</p>
       )}
+
+      {slotId && onClearOrUndo ? (
+        <button
+          type="button"
+          disabled={!undoAvailable && nutrition.count === 0}
+          onClick={onClearOrUndo}
+          className={cn(
+            "w-full h-8 rounded-lg text-[10px] font-medium transition-colors inline-flex items-center justify-center gap-1",
+            undoAvailable
+              ? "border border-accent/35 bg-accent/10 text-accent hover:bg-accent/20"
+              : "border border-border/60 bg-background/30 text-muted-foreground hover:text-destructive hover:border-destructive/40 hover:bg-destructive/5",
+            "disabled:opacity-40 disabled:pointer-events-none"
+          )}
+        >
+          {undoAvailable ? (
+            <>
+              <Undo2 className="h-3 w-3" />
+              되돌리기
+            </>
+          ) : (
+            "메뉴 비우기"
+          )}
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -526,18 +560,19 @@ function MacroCard({
   formatValue?: (value: number) => string
   children?: React.ReactNode
 }) {
-  const format = formatValue ?? formatMacroG
-  const suffix = unit ? unit : "kcal"
-
   return (
-    <div className="rounded-xl border border-border/50 bg-background/40 px-3 py-2.5">
-      <div className="flex items-center justify-between gap-2 mb-1.5">
-        <span className="text-[11px] font-medium text-foreground">{label}</span>
-        <span className="text-[11px] tabular-nums text-muted-foreground">
-          {format(value)}
-          {suffix} / {format(target)}
-          {suffix}
-          <span className="text-accent ml-1">({pct}%)</span>
+    <div className="rounded-xl border border-border/50 bg-background/40 px-3 py-2.5 min-w-0">
+      <div className="flex flex-nowrap items-center justify-between gap-1.5 mb-1.5 min-w-0">
+        <span className="text-[11px] font-medium text-foreground whitespace-nowrap shrink-0">
+          {label}
+        </span>
+        <span className="text-[10px] sm:text-[11px] tabular-nums text-muted-foreground whitespace-nowrap shrink-0 text-right">
+          <MacroRangeLabel
+            value={value}
+            target={target}
+            unit={unit}
+            formatValue={formatValue}
+          />
         </span>
       </div>
       <Progress value={pct} className="h-1.5" />
@@ -550,18 +585,24 @@ export function NutritionDailySummary({
   entries,
   targets,
   onSelectFood,
+  onClearAllOrUndo,
+  clearAllUndoAvailable = false,
+  onClearOrUndoMealSlot,
+  mealSlotUndoAvailable,
 }: {
   entries: LoggedFoodEntry[]
   targets: MacroTargets
   onSelectFood?: (food: FoodDatabaseItem) => void
+  onClearAllOrUndo?: () => void
+  clearAllUndoAvailable?: boolean
+  onClearOrUndoMealSlot?: (slotId: FoodMealSlotId, label: string) => void
+  mealSlotUndoAvailable?: Partial<Record<FoodMealSlotId, boolean>>
 }) {
-  const [scope, setScope] = useState<"daily" | "perMeal">("daily")
   const [activeKind, setActiveKind] = useState<DietJudgmentKind | null>(null)
   const [recommendationExcludeIds, setRecommendationExcludeIds] = useState<string[]>([])
   const [recommendationRotateOffset, setRecommendationRotateOffset] = useState(0)
   const totals = useMemo(() => sumLoggedNutrition(entries), [entries])
 
-  const mealCalories = useMemo(() => groupCaloriesByMeal(entries), [entries])
   const mealNutrition = useMemo(() => groupNutritionByMeal(entries), [entries])
   const mealEntries = useMemo(() => groupEntriesByMeal(entries), [entries])
   const mealSlotTargets = useMemo(
@@ -582,28 +623,6 @@ export function NutritionDailySummary({
     [targets.breakdown.coachingMode]
   )
 
-  const coachingModeLabel = useMemo(() => {
-    const mode = targets.breakdown.coachingMode
-    if (!mode) return null
-    return (
-      COACHING_DIET_MODE_OPTIONS.find((o) => o.value === mode)?.label ??
-      (mode === "fast_loss" ? "강한 감량" : "일반 감량")
-    )
-  }, [targets.breakdown.coachingMode])
-
-  const dailyPct = useMemo(
-    () => ({
-      calories: nutritionPercent(totals.calories, targets.calories),
-      carbs: nutritionPercent(totals.carbsG, targets.carbsG),
-      protein: nutritionPercent(totals.proteinG, targets.proteinG),
-      fat: nutritionPercent(totals.fatG, targets.fatG),
-      sodium: nutritionPercent(totals.sodiumMg, targets.sodiumMg),
-      sugar: nutritionPercent(totals.sugarG, targets.sugarG),
-      fiber: nutritionPercent(totals.fiberG, targets.fiberG),
-    }),
-    [totals, targets]
-  )
-
   const judgmentTags = useMemo(
     () => buildDietJudgmentSummary(totals, targets),
     [totals, targets]
@@ -612,11 +631,6 @@ export function NutritionDailySummary({
   const warningContext = useMemo(
     () => buildDietWarningContext(judgmentTags),
     [judgmentTags]
-  )
-
-  const feedbacks = useMemo(
-    () => buildNutritionFeedbacks(totals, targets),
-    [totals, targets]
   )
 
   const recommendationBundle = useMemo(
@@ -652,157 +666,62 @@ export function NutritionDailySummary({
     }
   }, [totals, entries])
 
-  if (totals.count === 0) return null
+  if (totals.count === 0 && !clearAllUndoAvailable) return null
+
+  const evaluationSummary = judgmentTags
+    .slice(0, 3)
+    .map((tag) => tag.label)
+    .join(" · ")
+
+  const mealSummary = `${totals.count}개 기록 · ${FOOD_MEAL_SLOTS.length}끼`
 
   return (
-    <div className="space-y-3 mb-3">
-      <div className="rounded-xl border border-accent/25 bg-accent/5 px-3 py-2.5">
-        <div className="flex items-center justify-between gap-2 mb-2">
-          <p className="text-[11px] font-semibold text-accent">식단 질 평가</p>
-          {coachingModeLabel ? (
-            <span className="shrink-0 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
-              {coachingModeLabel} 모드
-            </span>
+    <div className="space-y-2 mb-3">
+      <CollapsibleInlineSection
+        title="식단 질 평가"
+        summary={evaluationSummary || `${totals.count}개 기록`}
+        sectionId="nutrition-diet-evaluation"
+      >
+        <div className="rounded-xl border border-accent/25 bg-accent/5 px-3 py-2.5">
+          <p className="text-[10px] text-muted-foreground mb-2">
+            태그를 눌러 부족한 영양소 보완 음식을 추천받을 수 있어요.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {judgmentTags.map((tag) => (
+              <JudgmentChip
+                key={tag.label}
+                label={tag.label}
+                tone={tag.tone}
+                actionable={tag.actionable}
+                active={activeKind === tag.kind}
+                onClick={
+                  tag.actionable
+                    ? () =>
+                        setActiveKind((prev) =>
+                          prev === tag.kind ? null : tag.kind
+                        )
+                    : undefined
+                }
+              />
+            ))}
+          </div>
+          {recommendationBundle ? (
+            <div className="mt-3">
+              <RecommendationPanel
+                bundle={recommendationBundle}
+                onSelectFood={onSelectFood}
+                onRefresh={handleRefreshRecommendations}
+              />
+            </div>
           ) : null}
         </div>
-        <div className="flex flex-wrap gap-1.5">
-          {judgmentTags.map((tag) => (
-            <JudgmentChip
-              key={tag.label}
-              label={tag.label}
-              tone={tag.tone}
-              actionable={tag.actionable}
-              active={activeKind === tag.kind}
-              onClick={
-                tag.actionable
-                  ? () =>
-                      setActiveKind((prev) =>
-                        prev === tag.kind ? null : tag.kind
-                      )
-                  : undefined
-              }
-            />
-          ))}
-        </div>
-        {recommendationBundle ? (
-          <div className="mt-3">
-            <RecommendationPanel
-              bundle={recommendationBundle}
-              onSelectFood={onSelectFood}
-              onRefresh={handleRefreshRecommendations}
-            />
-          </div>
-        ) : null}
-      </div>
+      </CollapsibleInlineSection>
 
-      {feedbacks.length > 0 ? (
-        <div className="space-y-1.5">
-          {feedbacks.map((message) => (
-            <p
-              key={message}
-              className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-200/90"
-            >
-              {message}
-            </p>
-          ))}
-        </div>
-      ) : null}
-
-      <ScopeToggle value={scope} onChange={setScope} />
-
-      {scope === "daily" ? (
-      <div className="grid gap-2 sm:grid-cols-2">
-        <MacroCard
-          label="칼로리"
-          value={totals.calories}
-          target={targets.calories}
-          unit=""
-          pct={dailyPct.calories}
-          formatValue={formatCalories}
-        >
-          <div className="mt-2 space-y-1 pl-1 border-l border-accent/20 ml-0.5">
-            {FOOD_MEAL_SLOTS.map((slot) => {
-              const slotKey = slot.id as FoodMealSlotId
-              const kcal = mealCalories.grouped[slotKey]
-              const slotKcalTarget = mealSlotTargets[slotKey].calories
-              const pct = nutritionPercent(kcal, slotKcalTarget)
-              return (
-                <div key={slot.id}>
-                  <div className="flex justify-between text-[10px] pl-2">
-                    <span className="text-muted-foreground">└ {slot.label}</span>
-                    <span className="tabular-nums text-muted-foreground">
-                      {formatCalories(kcal)} / {formatCalories(slotKcalTarget)}kcal
-                      <span className="text-accent ml-1">({pct}%)</span>
-                    </span>
-                  </div>
-                  <Progress value={pct} className="h-1 ml-2" />
-                </div>
-              )
-            })}
-            {mealCalories.unassigned > 0 ? (
-              <div className="flex justify-between text-[10px] pl-2 pt-0.5">
-                <span className="text-muted-foreground">└ 미정</span>
-                <span className="tabular-nums text-muted-foreground">
-                  {formatCalories(mealCalories.unassigned)}kcal
-                </span>
-              </div>
-            ) : null}
-          </div>
-        </MacroCard>
-
-        <MacroCard
-          label="단백질"
-          value={totals.proteinG}
-          target={targets.proteinG}
-          unit="g"
-          pct={dailyPct.protein}
-        />
-
-        <MacroCard
-          label="탄수화물"
-          value={totals.carbsG}
-          target={targets.carbsG}
-          unit="g"
-          pct={dailyPct.carbs}
-        >
-          <div className="mt-2 space-y-1 pl-1 border-l border-accent/20 ml-0.5">
-            <div className="flex justify-between text-[10px] pl-2">
-              <span className="text-muted-foreground">└ 당류</span>
-              <span className="tabular-nums text-muted-foreground">
-                {formatMacroG(totals.sugarG)}g / {formatMacroG(targets.sugarG)}g
-                <span className="text-accent ml-1">({dailyPct.sugar}%)</span>
-              </span>
-            </div>
-            <Progress value={dailyPct.sugar} className="h-1 ml-2" />
-            <div className="flex justify-between text-[10px] pl-2">
-              <span className="text-muted-foreground">└ 식이섬유</span>
-              <span className="tabular-nums text-muted-foreground">
-                {formatMacroG(totals.fiberG)}g / {formatMacroG(targets.fiberG)}g
-                <span className="text-accent ml-1">({dailyPct.fiber}%)</span>
-              </span>
-            </div>
-            <Progress value={dailyPct.fiber} className="h-1 ml-2" />
-          </div>
-        </MacroCard>
-
-        <MacroCard
-          label="지방"
-          value={totals.fatG}
-          target={targets.fatG}
-          unit="g"
-          pct={dailyPct.fat}
-        />
-
-        <MacroCard
-          label="나트륨"
-          value={totals.sodiumMg}
-          target={targets.sodiumMg}
-          unit="mg"
-          pct={dailyPct.sodium}
-          formatValue={formatCalories}
-        />
-      </div>
-      ) : (
+      <CollapsibleInlineSection
+        title="끼니별 보기"
+        summary={mealSummary}
+        sectionId="nutrition-meal-breakdown"
+      >
         <div className="grid gap-2 sm:grid-cols-2">
           {FOOD_MEAL_SLOTS.map((slot) => (
             <PerMealSummaryCard
@@ -813,6 +732,15 @@ export function NutritionDailySummary({
               slotTargets={mealSlotTargets[slot.id as FoodMealSlotId]}
               mealEntries={mealEntries.grouped[slot.id as FoodMealSlotId]}
               coachingContext={coachingContext}
+              undoAvailable={Boolean(
+                mealSlotUndoAvailable?.[slot.id as FoodMealSlotId]
+              )}
+              onClearOrUndo={
+                onClearOrUndoMealSlot
+                  ? () =>
+                      onClearOrUndoMealSlot(slot.id as FoodMealSlotId, slot.label)
+                  : undefined
+              }
             />
           ))}
           {mealNutrition.unassigned.count > 0 ? (
@@ -827,20 +755,31 @@ export function NutritionDailySummary({
             </div>
           ) : null}
         </div>
-      )}
+      </CollapsibleInlineSection>
 
-      <p className="text-[10px] text-muted-foreground text-center tabular-nums px-1">
-        {scope === "daily" ? (
-          <>기록 {totals.count}개 · 합계 {formatCalories(totals.calories)}kcal</>
-        ) : (
-          <>
-            1끼별 목표 · 아침 {Math.round(MEAL_CALORIE_RATIO.breakfast * 100)}% ·
-            점심 {Math.round(MEAL_CALORIE_RATIO.lunch * 100)}% · 저녁{" "}
-            {Math.round(MEAL_CALORIE_RATIO.dinner * 100)}% · 간식{" "}
-            {Math.round(MEAL_CALORIE_RATIO.snack * 100)}% · 기록 {totals.count}개
-          </>
-        )}
-      </p>
+      {onClearAllOrUndo ? (
+        <button
+          type="button"
+          disabled={!clearAllUndoAvailable && totals.count === 0}
+          onClick={onClearAllOrUndo}
+          className={cn(
+            "w-full h-9 rounded-lg text-[11px] font-medium transition-colors inline-flex items-center justify-center gap-1.5",
+            clearAllUndoAvailable
+              ? "border border-accent/35 bg-accent/10 text-accent hover:bg-accent/20"
+              : "border border-border/60 text-muted-foreground hover:text-destructive hover:border-destructive/40 hover:bg-destructive/5",
+            "disabled:opacity-40 disabled:pointer-events-none"
+          )}
+        >
+          {clearAllUndoAvailable ? (
+            <>
+              <Undo2 className="h-3.5 w-3.5" />
+              되돌리기
+            </>
+          ) : (
+            "메뉴 모두 비우기"
+          )}
+        </button>
+      ) : null}
     </div>
   )
 }

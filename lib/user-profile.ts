@@ -7,9 +7,12 @@ import {
 import { getLatestWeightKg } from "@/lib/weight-tracker"
 import {
   calculateCoachingMacroPlan,
+  calculateTargetPeriodDietPlan,
+  formatTargetPeriodChangeRange,
   PROFILE_INCOMPLETE_MESSAGE,
   resolveCoachingMode,
   type DietCoachingMode,
+  type TargetPeriodAdvice,
 } from "@/lib/diet-coaching"
 
 export type Gender = "male" | "female"
@@ -76,6 +79,11 @@ export interface NutritionCalculationBreakdown {
   profileComplete: boolean
   profileIncompleteMessage: string | null
   snackCalorieMax: number | null
+  targetWeeks: number
+  weeklyWeightGoalKg: number
+  targetPeriodWarning: string | null
+  targetPeriodAdvice: TargetPeriodAdvice | null
+  usesTargetPeriodPlan: boolean
 }
 
 export interface MealMacroTargets {
@@ -438,10 +446,53 @@ function getMinimumCalories(profile: UserProfile): number {
 }
 
 function calculateWaterL(profile: UserProfile): number {
-  // 35 ml/kg + 운동 시 500 ml/시간 (ACSM)
-  const baseMl = profile.currentWeightKg * 35
-  const exerciseMl = (profile.dailyExerciseMinutes / 60) * 500
-  return Math.round((baseMl + exerciseMl) / 100) / 10
+  return calculateDailyWaterTarget(
+    profile.currentWeightKg,
+    profile.dietMode
+  ).waterL
+}
+
+export type WaterTargetMode = "general" | "loss"
+
+export interface DailyWaterTarget {
+  waterL: number
+  mode: WaterTargetMode
+  mlPerKg: number
+}
+
+export const WATER_EXERCISE_GUIDE_NOTE =
+  "운동량이 많은 날은 0.5~1.0L 추가 권장"
+
+function isLossDietMode(dietMode: DietMode): boolean {
+  return (
+    dietMode === "fast_loss" ||
+    dietMode === "normal_loss" ||
+    dietMode === "performance_loss"
+  )
+}
+
+/** 체중·식단 모드 기준 1일 권장 수분 (L) — 일반 30ml/kg · 감량 35ml/kg */
+export function calculateDailyWaterTarget(
+  weightKg: number,
+  dietMode: DietMode
+): DailyWaterTarget {
+  if (weightKg <= 0) {
+    return { waterL: 2, mode: "general", mlPerKg: 30 }
+  }
+
+  const mode: WaterTargetMode = isLossDietMode(dietMode) ? "loss" : "general"
+  const mlPerKg = mode === "loss" ? 35 : 30
+  const waterL = Math.max(Math.round((weightKg * mlPerKg) / 100) / 10, 2)
+
+  return { waterL, mode, mlPerKg }
+}
+
+/** @deprecated calculateDailyWaterTarget 사용 권장 */
+export function calculateDailyWaterTargetL(
+  weightKg: number,
+  dietMode: DietMode = "maintain"
+): number {
+  return calculateDailyWaterTarget(weightKg, dietMode).waterL
 }
 
 function calculateSodiumMg(
@@ -507,6 +558,7 @@ export function calculateDailyMacroTargets(
   const profileIncompleteMessage = profileComplete
     ? null
     : PROFILE_INCOMPLETE_MESSAGE
+  const targetPeriodPlan = calculateTargetPeriodDietPlan(calcProfile)
 
   let calories: number
   let proteinG: number
@@ -523,12 +575,18 @@ export function calculateDailyMacroTargets(
   let macroBasisNote: string
 
   if (coachingMode) {
+    const deficitOverride =
+      targetPeriodPlan.usesTargetPeriod &&
+      targetPeriodPlan.weeklyWeightGoalKg < -0.05
+        ? Math.abs(targetPeriodPlan.dailyCalorieAdjustment)
+        : undefined
     const plan = calculateCoachingMacroPlan(
       coachingMode,
       activeWeightKg,
       maintenanceCalories,
       trainingCategory,
-      getMinimumCalories(calcProfile)
+      getMinimumCalories(calcProfile),
+      deficitOverride
     )
     calories = plan.calories
     proteinG = plan.proteinG
@@ -543,10 +601,14 @@ export function calculateDailyMacroTargets(
     snackCalorieMax = plan.snackCalorieMax
     macroBasisNote =
       coachingMode === "fast_loss"
-        ? `강한 감량 · 유지 ${maintenanceCalories}kcal - ${plan.deficitKcal}kcal · 단백 ${proteinPerKg}g/kg · 지방 ${Math.round(plan.fatCaloriePct * 100)}% · 간식 ${snackCalorieMax}kcal 이내`
-        : `일반 감량 · 유지 ${maintenanceCalories}kcal - ${plan.deficitKcal}kcal · 단백 ${proteinPerKg}g/kg · 지방 ${Math.round(plan.fatCaloriePct * 100)}% · 당류 ${sugarG}g · 식이섬유 ${fiberG}g`
+        ? `강한 감량 · 유지 ${maintenanceCalories}kcal - ${plan.deficitKcal}kcal${targetPeriodPlan.usesTargetPeriod ? ` · 목표 ${calcProfile.targetWeeks}주 기준` : ""} · 단백 ${proteinPerKg}g/kg · 지방 ${Math.round(plan.fatCaloriePct * 100)}% · 간식 ${snackCalorieMax}kcal 이내`
+        : `일반 감량 · 유지 ${maintenanceCalories}kcal - ${plan.deficitKcal}kcal${targetPeriodPlan.usesTargetPeriod ? ` · 목표 ${calcProfile.targetWeeks}주 기준` : ""} · 단백 ${proteinPerKg}g/kg · 지방 ${Math.round(plan.fatCaloriePct * 100)}% · 당류 ${sugarG}g · 식이섬유 ${fiberG}g`
   } else {
-    dietAdjustment = getDietModeAdjustment(calcProfile.dietMode)
+    dietAdjustment =
+      targetPeriodPlan.usesTargetPeriod &&
+      Math.abs(targetPeriodPlan.weeklyWeightGoalKg) >= 0.05
+        ? targetPeriodPlan.dailyCalorieAdjustment
+        : getDietModeAdjustment(calcProfile.dietMode)
     trainingAdjustment = getTrainingDayCalorieAdjustment(
       trainingCategory,
       calcProfile.dietMode
@@ -592,7 +654,7 @@ export function calculateDailyMacroTargets(
     macroBasisNote = `체중 ${activeWeightKg}kg 기준 · 단백질 ${proteinPerKg}g/kg · 지방 ${fatPerKg}g/kg · 탄수화물 잔여 칼로리`
   }
 
-  const waterL = Math.max(calculateWaterL(calcProfile), 2)
+  const waterL = calculateWaterL(calcProfile)
   const mealsPerDay = Math.max(1, Math.min(calcProfile.mealsPerDay, 6))
   const totals = {
     calories,
@@ -613,7 +675,9 @@ export function calculateDailyMacroTargets(
     finalCalories: calories,
     goalModeLabel: getGoalModeLabel(calcProfile),
     dietModeLabel: getDietModeLabel(calcProfile.dietMode),
-    expectedWeightChangeRange: getExpectedWeightChangeRange(calcProfile.dietMode),
+    expectedWeightChangeRange: targetPeriodPlan.usesTargetPeriod
+      ? formatTargetPeriodChangeRange(targetPeriodPlan.weeklyWeightGoalKg)
+      : getExpectedWeightChangeRange(calcProfile.dietMode),
     trainingDayLabel,
     trainingCategory,
     proteinPerKg,
@@ -625,6 +689,11 @@ export function calculateDailyMacroTargets(
     profileComplete,
     profileIncompleteMessage,
     snackCalorieMax,
+    targetWeeks: calcProfile.targetWeeks,
+    weeklyWeightGoalKg: targetPeriodPlan.weeklyWeightGoalKg,
+    targetPeriodWarning: targetPeriodPlan.warning,
+    targetPeriodAdvice: targetPeriodPlan.advice,
+    usesTargetPeriodPlan: targetPeriodPlan.usesTargetPeriod,
   }
 
   const perMeal = dividePerMeal(totals, mealsPerDay)

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState } from "react"
 import type { MacroTargets } from "@/lib/user-profile"
 import { formatCalories } from "@/lib/user-profile"
 import {
@@ -24,12 +24,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
-import { Check, ChevronDown, ChevronRight } from "lucide-react"
+import { CollapsibleInlineSection } from "@/components/collapsible-card"
+import { Check, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useHydrated } from "@/hooks/use-hydrated"
 
@@ -347,38 +343,6 @@ function FoodPickerRow({
   )
 }
 
-function DetailAccordion({
-  title,
-  children,
-  defaultOpen = false,
-}: {
-  title: string
-  children: ReactNode
-  defaultOpen?: boolean
-}) {
-  const [open, setOpen] = useState(defaultOpen)
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger asChild>
-        <button
-          type="button"
-          className="w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-left transition-colors active:opacity-80 bg-secondary/30 hover:bg-secondary/50"
-        >
-          <span className="text-[13px] font-medium">{title}</span>
-          <ChevronDown
-            className={cn(
-              "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
-              open && "rotate-180"
-            )}
-          />
-        </button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="pt-2">{children}</CollapsibleContent>
-    </Collapsible>
-  )
-}
-
 export function NutritionTargetPanel({
   targets,
   onPlanChange,
@@ -514,7 +478,7 @@ export function NutritionTargetPanel({
       </div>
 
       <div className="space-y-2 pt-1">
-        <DetailAccordion title="음식 예시 보기">
+        <CollapsibleInlineSection title="음식 예시 보기" sectionId="nutrition-food-examples">
           <div className="rounded-xl bg-secondary/20 px-1 py-1 space-y-0.5">
             {plan.hasSelections && (
               <div className="flex justify-end px-2 pt-1">
@@ -542,9 +506,9 @@ export function NutritionTargetPanel({
               />
             ))}
           </div>
-        </DetailAccordion>
+        </CollapsibleInlineSection>
 
-        <DetailAccordion title="수분 · 나트륨 상세">
+        <CollapsibleInlineSection title="수분 · 나트륨 상세" sectionId="nutrition-water-sodium">
           <div className="rounded-xl bg-secondary/20 divide-y divide-border/40 px-3">
             {SECONDARY_NUTRIENTS.map((n) => {
               const dailyVal = formatMacroAmount(
@@ -575,7 +539,7 @@ export function NutritionTargetPanel({
               )
             })}
           </div>
-        </DetailAccordion>
+        </CollapsibleInlineSection>
       </div>
     </div>
   )

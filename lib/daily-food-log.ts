@@ -1,12 +1,16 @@
 import type { PortionGoalScope } from "@/lib/food-portion-calculator"
 import {
-  formatServingCountDisplay,
+  formatFullFoodPortion,
+  formatPortionAmount,
   getFoodById,
+  getPieceWeightG,
   gramsForServingCount,
 } from "@/lib/food-database"
 import { toLoggedNutrition, type LoggedNutrition } from "@/lib/food-nutrition-utils"
+import type { FoodMealSlotId } from "@/lib/meal-slot-targets"
 import type { MealSlotId } from "@/lib/nutrition"
 import { NUTRITION_EVENT } from "@/lib/nutrition"
+import { getTodayDateKey } from "@/lib/daily-date"
 
 export const DAILY_FOOD_LOG_EVENT = "daily-food-log-updated"
 
@@ -30,14 +34,9 @@ export interface LoggedFoodEntry {
 export interface DailyFoodLog {
   date: string
   entries: LoggedFoodEntry[]
+  /** 오늘 섭취 수분 (L) */
+  waterConsumedL?: number
   updatedAt: string
-}
-
-function getTodayDateKey(now = new Date()): string {
-  const y = now.getFullYear()
-  const m = String(now.getMonth() + 1).padStart(2, "0")
-  const d = String(now.getDate()).padStart(2, "0")
-  return `${y}-${m}-${d}`
 }
 
 function generateId(): string {
@@ -74,9 +73,10 @@ function normalizeEntry(raw: LoggedFoodEntry): LoggedFoodEntry | null {
   const food = getFoodById(raw.foodId)
   if (!food) return null
 
+  const pieceWeight = getPieceWeightG(food)
   const inferredCount =
-    food.servingGrams && raw.grams
-      ? Math.max(0.5, Math.round((raw.grams / food.servingGrams) * 2) / 2)
+    pieceWeight && raw.grams
+      ? Math.max(0.5, Math.round((raw.grams / pieceWeight) * 2) / 2)
       : 1
   const servingCount =
     typeof raw.servingCount === "number" && raw.servingCount > 0
@@ -84,7 +84,7 @@ function normalizeEntry(raw: LoggedFoodEntry): LoggedFoodEntry | null {
       : inferredCount
 
   const unitGrams =
-    food.servingGrams ??
+    pieceWeight ??
     (servingCount > 0 && raw.grams ? raw.grams / servingCount : 100)
   const grams =
     typeof raw.grams === "number" && raw.grams > 0
@@ -93,13 +93,13 @@ function normalizeEntry(raw: LoggedFoodEntry): LoggedFoodEntry | null {
   const computed = toLoggedNutrition(food, grams)
 
   const nutrition: LoggedNutrition = {
-    calories: Number(raw.nutrition?.calories ?? computed.calories) || 0,
-    carbsG: Number(raw.nutrition?.carbsG ?? computed.carbsG) || 0,
-    proteinG: Number(raw.nutrition?.proteinG ?? computed.proteinG) || 0,
-    fatG: Number(raw.nutrition?.fatG ?? computed.fatG) || 0,
-    sodiumMg: Number(raw.nutrition?.sodiumMg ?? computed.sodiumMg) || 0,
-    sugarG: Number(raw.nutrition?.sugarG ?? computed.sugarG) || 0,
-    fiberG: Number(raw.nutrition?.fiberG ?? computed.fiberG) || 0,
+    calories: computed.calories,
+    carbsG: computed.carbsG,
+    proteinG: computed.proteinG,
+    fatG: computed.fatG,
+    sodiumMg: computed.sodiumMg,
+    sugarG: computed.sugarG ?? 0,
+    fiberG: computed.fiberG ?? 0,
   }
 
   return {
@@ -108,9 +108,14 @@ function normalizeEntry(raw: LoggedFoodEntry): LoggedFoodEntry | null {
     servingCount,
     displayAmount:
       raw.displayAmount ||
-      formatServingCountDisplay(food, servingCount, unitGrams),
+      formatFullFoodPortion(food, servingCount, unitGrams),
     nutrition,
   }
+}
+
+function normalizeWaterL(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return 0
+  return Math.round(value * 10) / 10
 }
 
 function normalizeDailyLog(log: DailyFoodLog): DailyFoodLog {
@@ -118,16 +123,34 @@ function normalizeDailyLog(log: DailyFoodLog): DailyFoodLog {
     .map((entry) => normalizeEntry(entry))
     .filter((entry): entry is LoggedFoodEntry => entry !== null)
 
-  return { ...log, entries }
+  return {
+    ...log,
+    entries,
+    waterConsumedL: normalizeWaterL(log.waterConsumedL),
+  }
 }
 
 export function loadTodayFoodLog(now = new Date()): DailyFoodLog {
   const date = getTodayDateKey(now)
   const existing = readAll()[date]
   if (!existing) {
-    return { date, entries: [], updatedAt: new Date().toISOString() }
+    return {
+      date,
+      entries: [],
+      waterConsumedL: 0,
+      updatedAt: new Date().toISOString(),
+    }
   }
   return normalizeDailyLog({ ...existing, date })
+}
+
+/** 영양 DB·사용자 수정 반영 후 오늘 기록 재계산 */
+export function refreshTodayFoodLogNutrition(now = new Date()): DailyFoodLog {
+  const log = loadTodayFoodLog(now)
+  const all = readAll()
+  all[log.date] = { ...log, updatedAt: now.toISOString() }
+  writeAll(all)
+  return log
 }
 
 export function addFoodLogEntry(
@@ -135,6 +158,66 @@ export function addFoodLogEntry(
   now = new Date()
 ): DailyFoodLog {
   return addFoodLogEntries([entry], now)
+}
+
+export type MealFoodLogSource = {
+  slotId: FoodMealSlotId
+  label: string
+  items: Array<{
+    foodId: string
+    name: string
+    displayAmount: string
+    servings: number
+    grams: number
+    nutrition: LoggedNutrition
+  }>
+}
+
+export function mealToFoodLogEntries(
+  meal: MealFoodLogSource
+): Omit<LoggedFoodEntry, "id" | "appliedAt">[] {
+  return meal.items.map((item) => ({
+    foodId: item.foodId,
+    name: item.name,
+    grams: item.grams,
+    displayAmount: item.displayAmount,
+    servingCount: item.servings,
+    scope: "meal",
+    scopeLabel: meal.label,
+    mealSlotId: meal.slotId,
+    nutrition: item.nutrition,
+  }))
+}
+
+/** 같은 끼니 슬롯 기록을 교체한 뒤 새 항목을 추가합니다. */
+export function replaceMealSlotFoodLogEntries(
+  mealSlotId: MealSlotId,
+  entries: Omit<LoggedFoodEntry, "id" | "appliedAt">[],
+  now = new Date()
+): DailyFoodLog {
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const current = all[date] ?? loadTodayFoodLog(now)
+  const appliedAt = now.toISOString()
+  const kept = current.entries.filter((e) => e.mealSlotId !== mealSlotId)
+
+  const next: DailyFoodLog = {
+    ...current,
+    date,
+    entries: [
+      ...entries.map((entry) => ({
+        ...entry,
+        id: generateId(),
+        appliedAt,
+      })),
+      ...kept,
+    ],
+    updatedAt: appliedAt,
+  }
+
+  all[date] = next
+  writeAll(all)
+  return next
 }
 
 export function addFoodLogEntries(
@@ -151,6 +234,7 @@ export function addFoodLogEntries(
   const appliedAt = now.toISOString()
 
   const next: DailyFoodLog = {
+    ...current,
     date,
     entries: [
       ...entries.map((entry) => ({
@@ -184,6 +268,84 @@ export function removeFoodLogEntry(id: string, now = new Date()): DailyFoodLog {
   return next
 }
 
+export function clearTodayFoodLog(now = new Date()): DailyFoodLog {
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const current = all[date] ?? loadTodayFoodLog(now)
+  const next: DailyFoodLog = {
+    ...current,
+    date,
+    entries: [],
+    updatedAt: now.toISOString(),
+  }
+  all[date] = next
+  writeAll(all)
+  return next
+}
+
+export function clearMealSlotFoodLogEntries(
+  mealSlotId: MealSlotId,
+  now = new Date()
+): DailyFoodLog {
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const current = all[date] ?? loadTodayFoodLog(now)
+  const next: DailyFoodLog = {
+    ...current,
+    entries: current.entries.filter((e) => e.mealSlotId !== mealSlotId),
+    updatedAt: now.toISOString(),
+  }
+  all[date] = next
+  writeAll(all)
+  return next
+}
+
+export function restoreTodayFoodLog(
+  log: DailyFoodLog,
+  now = new Date()
+): DailyFoodLog {
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const next = normalizeDailyLog({
+    ...log,
+    date,
+    updatedAt: now.toISOString(),
+  })
+  all[date] = next
+  writeAll(all)
+  return next
+}
+
+export function setTodayWaterConsumedL(
+  waterL: number,
+  now = new Date()
+): DailyFoodLog {
+  const normalized = normalizeWaterL(waterL)
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const current = all[date] ?? loadTodayFoodLog(now)
+  const next: DailyFoodLog = {
+    ...current,
+    waterConsumedL: normalized,
+    updatedAt: now.toISOString(),
+  }
+  all[date] = next
+  writeAll(all)
+  return next
+}
+
+export function addTodayWaterConsumedL(
+  deltaL: number,
+  now = new Date()
+): DailyFoodLog {
+  const log = loadTodayFoodLog(now)
+  return setTodayWaterConsumedL((log.waterConsumedL ?? 0) + deltaL, now)
+}
+
+export function getTodayWaterConsumedL(now = new Date()): number {
+  return loadTodayFoodLog(now).waterConsumedL ?? 0
+}
+
 export function adjustFoodLogServingCount(
   id: string,
   delta: number,
@@ -208,7 +370,7 @@ export function adjustFoodLogServingCount(
   if (!food) return current
 
   const unitGrams =
-    food.servingGrams ??
+    getPieceWeightG(food) ??
     (currentCount > 0 ? entry.grams / currentCount : entry.grams)
   const grams = gramsForServingCount(food, nextCount, unitGrams)
   const nutrition = toLoggedNutrition(food, grams)
@@ -221,7 +383,7 @@ export function adjustFoodLogServingCount(
             ...e,
             servingCount: nextCount,
             grams,
-            displayAmount: formatServingCountDisplay(food, nextCount, unitGrams),
+            displayAmount: formatFullFoodPortion(food, nextCount, unitGrams),
             nutrition: {
               calories: nutrition.calories,
               carbsG: nutrition.carbsG,

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Loader2, Minus, PenLine, Plus, Search, ShoppingCart, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -11,6 +11,7 @@ import {
 } from "@/components/food-entry-detail-dialog"
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogFooter,
   DialogHeader,
@@ -21,9 +22,17 @@ import { Label } from "@/components/ui/label"
 import { FORM_INPUT_CLASS } from "@/lib/form-styles"
 import { CustomFoodFormDialog } from "@/components/custom-food-form-dialog"
 import {
+  RecommendedMealMenuPanel,
+  type RecommendedMealMenuPanelHandle,
+  type RecommendedMenuItemSelectContext,
+} from "@/components/recommended-meal-menu-panel"
+import { CollapsibleInlineSection } from "@/components/collapsible-card"
+import {
   searchFoodDatabase,
-  formatServingCountDisplay,
+  formatFullFoodPortion,
+  formatPortionAmount,
   getFoodById,
+  getPieceWeightG,
   getServingUnit,
   gramsForServingCount,
   nutritionAtGrams,
@@ -38,21 +47,30 @@ import {
   type CustomFoodItem,
 } from "@/lib/custom-food-store"
 import {
+  FOOD_NUTRITION_OVERRIDE_EVENT,
+  isNutritionOverrideEditable,
+} from "@/lib/food-nutrition-overrides"
+import { getPortionUnitWarning } from "@/lib/food-portion-validation"
+import { FoodNutritionOverrideDialog } from "@/components/food-nutrition-override-dialog"
+import {
   calculateFoodPortionPlan,
   type PortionGoalScope,
   type PortionRecommendation,
 } from "@/lib/food-portion-calculator"
 import {
   addFoodLogEntries,
-  adjustFoodLogServingCount,
+  clearMealSlotFoodLogEntries,
+  clearTodayFoodLog,
   DAILY_FOOD_LOG_EVENT,
   loadTodayFoodLog,
-  removeFoodLogEntry,
-  updateFoodLogMealSlot,
+  refreshTodayFoodLogNutrition,
+  restoreTodayFoodLog,
   type LoggedFoodEntry,
   type DailyFoodLog,
 } from "@/lib/daily-food-log"
+import { DAILY_DATE_CHANGED_EVENT } from "@/lib/daily-date"
 import { MEAL_SLOTS, type MealSlotId } from "@/lib/nutrition"
+import type { FoodMealSlotId } from "@/lib/meal-slot-targets"
 import { formatCalories, type MacroTargets } from "@/lib/user-profile"
 import {
   formatMacroG,
@@ -101,7 +119,7 @@ function adjustCartServing(
     if (!food) return [item]
 
     const unitGrams =
-      food.servingGrams ??
+      getPieceWeightG(food) ??
       (item.servingCount > 0 ? item.grams / item.servingCount : item.grams)
     const grams = gramsForServingCount(food, nextCount, unitGrams)
     const nutrition = nutritionAtGrams(food, grams)
@@ -111,7 +129,7 @@ function adjustCartServing(
         ...item,
         servingCount: nextCount,
         grams,
-        displayAmount: formatServingCountDisplay(food, nextCount, unitGrams),
+        displayAmount: formatFullFoodPortion(food, nextCount, unitGrams),
         nutrition: {
           calories: nutrition.calories,
           carbsG: nutrition.carbsG,
@@ -249,6 +267,9 @@ function FoodDetailDialog({
   targets,
   onAddToCart,
   onEditCustom,
+  onEditNutritionOverride,
+  recommendedMenuContext,
+  onApplyToRecommendedMenu,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -256,6 +277,9 @@ function FoodDetailDialog({
   targets: MacroTargets
   onAddToCart: (item: Omit<FoodCartItem, "cartId">) => void
   onEditCustom?: () => void
+  onEditNutritionOverride?: () => void
+  recommendedMenuContext?: RecommendedMenuItemSelectContext | null
+  onApplyToRecommendedMenu?: (servingCount: number) => void
 }) {
   const [applyScope, setApplyScope] = useState<"meal" | "daily">("meal")
   const [mealSlot, setMealSlot] = useState<MealSlotId>("breakfast")
@@ -275,22 +299,30 @@ function FoodDetailDialog({
   useEffect(() => {
     if (open) {
       setApplyScope("meal")
-      setMealSlot("breakfast")
-      setServingCount(1)
+      if (recommendedMenuContext) {
+        setServingCount(recommendedMenuContext.servingCount)
+      } else {
+        setMealSlot("breakfast")
+        setServingCount(1)
+      }
     }
-  }, [open, food?.id])
+  }, [open, food?.id, recommendedMenuContext])
 
   if (!food || !plan || !selected) return null
 
-  const appliedGrams = gramsForServingCount(food, servingCount, selected.grams)
+  const isRecommendedMenuMode = Boolean(recommendedMenuContext && onApplyToRecommendedMenu)
+  const portionUnitGrams = isRecommendedMenuMode
+    ? (getPieceWeightG(food) ?? 100)
+    : selected.grams
+  const appliedGrams = gramsForServingCount(food, servingCount, portionUnitGrams)
   const appliedNutrition = nutritionAtGrams(food, appliedGrams)
-  const appliedDisplay = formatServingCountDisplay(
-    food,
-    servingCount,
-    selected.grams
-  )
+  const appliedDisplay = formatFullFoodPortion(food, servingCount, portionUnitGrams)
+  const appliedPortionOnly = formatPortionAmount(food, servingCount, portionUnitGrams)
   const servingUnit = getServingUnit(food)
   const factsRows = buildFactsRows(plan, selected, appliedNutrition)
+  const portionWarning = getPortionUnitWarning(food, appliedGrams, appliedNutrition)
+  const canEditOverride = isNutritionOverrideEditable(food.id)
+  const pieceWeight = getPieceWeightG(food)
 
   const handleAddToCart = () => {
     onAddToCart({
@@ -316,35 +348,86 @@ function FoodDetailDialog({
     onOpenChange(false)
   }
 
+  const handleApplyToRecommendedMenu = () => {
+    if (!onApplyToRecommendedMenu) return
+    onApplyToRecommendedMenu(servingCount)
+    toast.success(
+      `「${recommendedMenuContext?.mealLabel}」 메뉴에 ${food.name} ${servingCount}${servingUnit} 반영했습니다`
+    )
+    onOpenChange(false)
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-card border-border max-w-md max-h-[90dvh] overflow-y-auto p-0 gap-0">
+      <DialogContent
+        showCloseButton={false}
+        className="bg-card border-border max-w-md max-h-[90dvh] overflow-y-auto p-0 gap-0"
+      >
         <DialogHeader className="px-4 pt-4 pb-2 border-b border-border/60">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
               <DialogTitle className="text-base">{food.name}</DialogTitle>
               <p className="text-[12px] text-muted-foreground font-normal">
-                {food.category}
-                {food.isCustom ? " · 내 음식" : ""}
-                {food.servingLabel ? ` · 기준 ${food.servingLabel}` : ""}
+                {isRecommendedMenuMode && recommendedMenuContext
+                  ? `${recommendedMenuContext.mealLabel} 추천 메뉴 · 수량 조정`
+                  : null}
+                {!isRecommendedMenuMode ? (
+                  <>
+                    {food.category}
+                    {food.isCustom ? " · 내 음식" : ""}
+                    {pieceWeight && food.servingLabel
+                      ? ` · ${food.servingLabel} = ${pieceWeight}g`
+                      : ""}
+                    {" · "}
+                    100g당 영양 기준
+                  </>
+                ) : null}
               </p>
             </div>
-            {food.isCustom && onEditCustom ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="shrink-0 h-8 px-2.5 text-[11px]"
-                onClick={onEditCustom}
-              >
-                <PenLine className="h-3.5 w-3.5 mr-1" />
-                수정
-              </Button>
-            ) : null}
+            <div className="flex shrink-0 items-center gap-1">
+              {canEditOverride && onEditNutritionOverride ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2.5 text-[11px]"
+                  onClick={onEditNutritionOverride}
+                >
+                  <PenLine className="h-3.5 w-3.5 mr-1" />
+                  내 기준
+                </Button>
+              ) : null}
+              {food.isCustom && onEditCustom ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2.5 text-[11px]"
+                  onClick={onEditCustom}
+                >
+                  <PenLine className="h-3.5 w-3.5 mr-1" />
+                  수정
+                </Button>
+              ) : null}
+              <DialogClose asChild>
+                <button
+                  type="button"
+                  className="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors shrink-0"
+                  aria-label="닫기"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </DialogClose>
+            </div>
           </div>
         </DialogHeader>
 
         <div className="px-4 py-3 space-y-4">
+          {portionWarning ? (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+              <p className="text-[11px] text-amber-200 leading-relaxed">{portionWarning}</p>
+            </div>
+          ) : null}
           <div className="flex rounded-xl bg-secondary/50 p-1 gap-1">
             {(
               [
@@ -388,7 +471,9 @@ function FoodDetailDialog({
           <div className="space-y-1.5">
             <Label className="text-[11px] text-muted-foreground">
               섭취량
-              {food.servingLabel ? ` (${food.servingLabel} 기준)` : ""}
+              {food.servingLabel && pieceWeight
+                ? ` (${food.servingLabel} = ${pieceWeight}g)`
+                : " (g)"}
             </Label>
             <div className="flex items-center gap-3">
               <Button
@@ -410,7 +495,7 @@ function FoodDetailDialog({
                   {servingUnit}
                 </p>
                 <p className="text-[11px] text-muted-foreground tabular-nums">
-                  {appliedGrams}g · {formatCalories(appliedNutrition.calories)}kcal
+                  {appliedPortionOnly} · {formatCalories(appliedNutrition.calories)}kcal
                 </p>
               </div>
               <Button
@@ -428,10 +513,12 @@ function FoodDetailDialog({
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <Label className="text-[11px] text-muted-foreground">어느 끼니에 넣을까요?</Label>
-            <MealSlotPicker value={mealSlot} onChange={setMealSlot} />
-          </div>
+          {!isRecommendedMenuMode ? (
+            <div className="space-y-1.5">
+              <Label className="text-[11px] text-muted-foreground">어느 끼니에 넣을까요?</Label>
+              <MealSlotPicker value={mealSlot} onChange={setMealSlot} />
+            </div>
+          ) : null}
         </div>
 
         <DialogFooter className="px-4 py-3 border-t border-border/60 gap-2 sm:gap-2">
@@ -446,9 +533,11 @@ function FoodDetailDialog({
           <Button
             type="button"
             className="flex-1 bg-accent text-accent-foreground hover:bg-accent/90"
-            onClick={handleAddToCart}
+            onClick={
+              isRecommendedMenuMode ? handleApplyToRecommendedMenu : handleAddToCart
+            }
           >
-            장바구니에 담기
+            {isRecommendedMenuMode ? "메뉴에 반영" : "장바구니에 담기"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -462,6 +551,7 @@ type MealGridItem = {
   name: string
   displayAmount: string
   servingCount: number
+  grams: number
   mealSlotId?: MealSlotId
   nutrition: LoggedFoodEntry["nutrition"]
 }
@@ -524,12 +614,19 @@ function MealGroupedFoodGrid({
                 ) : (
                   columnItems.map((item) => {
                     const food = getFoodById(item.foodId)
-                    const unit = food ? getServingUnit(food) : "개"
-                    const count =
-                      item.servingCount % 1 === 0
-                        ? item.servingCount
-                        : item.servingCount
+                    const portionText =
+                      food && item.grams > 0
+                        ? formatPortionAmount(
+                            food,
+                            item.servingCount,
+                            item.grams / Math.max(item.servingCount, 0.5)
+                          )
+                        : item.displayAmount
                     const n = item.nutrition
+                    const portionWarning =
+                      food && item.grams > 0
+                        ? getPortionUnitWarning(food, item.grams, n)
+                        : null
 
                     return (
                       <div
@@ -549,18 +646,22 @@ function MealGroupedFoodGrid({
                           onClick={() => onItemClick(item)}
                           className="w-full rounded-lg px-1.5 py-1.5 pr-5 text-left"
                         >
-                          <p className="text-[11px] font-medium leading-snug line-clamp-2">
+                          <p className="text-[11px] font-semibold leading-snug line-clamp-2">
                             {item.name}
                           </p>
                           <p className="text-[9px] text-muted-foreground tabular-nums mt-0.5">
-                            {count}
-                            {unit} · {formatCalories(n.calories)}kcal
+                            {portionText} · {formatCalories(n.calories)}kcal
                           </p>
                           <p className="text-[8px] text-muted-foreground/80 tabular-nums mt-0.5 leading-tight">
-                            탄수 {formatMacroG(n.carbsG)}g · 당{" "}
-                            {formatMacroG(n.sugarG ?? 0)}g · 단백{" "}
-                            {formatMacroG(n.proteinG)}g
+                            탄수 {formatMacroG(n.carbsG)}g · 단백{" "}
+                            {formatMacroG(n.proteinG)}g · 지방 {formatMacroG(n.fatG)}g
                           </p>
+                          {portionWarning ? (
+                            <p className="text-[8px] text-amber-400/90 mt-0.5 leading-tight line-clamp-2">
+                              ⚠ 단위 확인
+                            </p>
+                          ) : null}
+                          <p className="text-[8px] text-accent/80 mt-0.5">탭 → 상세 영양</p>
                         </button>
                       </div>
                     )
@@ -605,6 +706,7 @@ function FoodCartList({
   onChangeMealSlot,
   onCheckout,
   onClear,
+  onEditNutrition,
 }: {
   items: FoodCartItem[]
   onRemove: (cartId: string) => void
@@ -612,6 +714,7 @@ function FoodCartList({
   onChangeMealSlot: (cartId: string, slotId: MealSlotId) => void
   onCheckout: () => void
   onClear: () => void
+  onEditNutrition?: (foodId: string) => void
 }) {
   const [detailItem, setDetailItem] = useState<FoodEntryDetailItem | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
@@ -630,6 +733,7 @@ function FoodCartList({
       name: updated.name,
       displayAmount: updated.displayAmount,
       servingCount: updated.servingCount,
+      grams: updated.grams,
       mealSlotId: updated.mealSlotId,
       nutrition: updated.nutrition,
     })
@@ -644,6 +748,7 @@ function FoodCartList({
     name: item.name,
     displayAmount: item.displayAmount,
     servingCount: item.servingCount,
+    grams: item.grams,
     mealSlotId: item.mealSlotId,
     nutrition: item.nutrition,
   }))
@@ -705,82 +810,9 @@ function FoodCartList({
         item={detailItem}
         onAdjustServing={onAdjustServing}
         onChangeMealSlot={onChangeMealSlot}
+        onEditNutrition={onEditNutrition}
       />
     </div>
-  )
-}
-
-function TodayFoodList({
-  entries,
-  onRemove,
-  onAdjustServing,
-  onChangeMealSlot,
-}: {
-  entries: LoggedFoodEntry[]
-  onRemove: (id: string) => void
-  onAdjustServing: (id: string, delta: number) => void
-  onChangeMealSlot: (id: string, slotId: MealSlotId) => void
-}) {
-  const [detailItem, setDetailItem] = useState<FoodEntryDetailItem | null>(null)
-  const [detailOpen, setDetailOpen] = useState(false)
-
-  useEffect(() => {
-    if (!detailItem) return
-    const updated = entries.find((entry) => entry.id === detailItem.id)
-    if (!updated) {
-      setDetailItem(null)
-      setDetailOpen(false)
-      return
-    }
-    setDetailItem({
-      id: updated.id,
-      foodId: updated.foodId,
-      name: updated.name,
-      displayAmount: updated.displayAmount,
-      servingCount: updated.servingCount ?? 1,
-      mealSlotId: updated.mealSlotId,
-      nutrition: updated.nutrition,
-    })
-  }, [entries, detailItem?.id])
-
-  const gridItems: MealGridItem[] = entries.map((entry) => ({
-    id: entry.id,
-    foodId: entry.foodId,
-    name: entry.name,
-    displayAmount: entry.displayAmount,
-    servingCount: entry.servingCount ?? 1,
-    mealSlotId: entry.mealSlotId,
-    nutrition: entry.nutrition,
-  }))
-
-  const openItemDetail = (item: MealGridItem) => {
-    setDetailItem(item)
-    setDetailOpen(true)
-  }
-
-  return (
-    <>
-      <MealGroupedFoodGrid
-        items={gridItems}
-        onItemClick={openItemDetail}
-        onRemove={(id) => {
-          onRemove(id)
-          if (detailItem?.id === id) {
-            setDetailItem(null)
-            setDetailOpen(false)
-          }
-        }}
-        emptyMessage="검색 후 장바구니에 담고, 한번에 적용하면 여기에 표시됩니다."
-      />
-
-      <FoodEntryDetailDialog
-        open={detailOpen}
-        onOpenChange={setDetailOpen}
-        item={detailItem}
-        onAdjustServing={(id, delta) => onAdjustServing(id, delta)}
-        onChangeMealSlot={onChangeMealSlot}
-      />
-    </>
   )
 }
 
@@ -804,14 +836,127 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
   const [editCustomFood, setEditCustomFood] = useState<CustomFoodItem | null>(null)
   const [customFormInitialName, setCustomFormInitialName] = useState("")
   const [customFoodVersion, setCustomFoodVersion] = useState(0)
+  const [nutritionOverrideVersion, setNutritionOverrideVersion] = useState(0)
+  const [overrideFood, setOverrideFood] = useState<FoodDatabaseItem | null>(null)
+  const [overrideDialogOpen, setOverrideDialogOpen] = useState(false)
+  const [recommendedMenuEdit, setRecommendedMenuEdit] =
+    useState<RecommendedMenuItemSelectContext | null>(null)
+  const recommendedMenuRef = useRef<RecommendedMealMenuPanelHandle>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [slotUndoSnapshots, setSlotUndoSnapshots] = useState<
+    Partial<Record<FoodMealSlotId, LoggedFoodEntry[]>>
+  >({})
+  const [clearAllUndoSnapshot, setClearAllUndoSnapshot] = useState<
+    LoggedFoodEntry[] | null
+  >(null)
+
+  useEffect(() => {
+    setSlotUndoSnapshots((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const slot of FOOD_MEAL_SLOTS) {
+        const slotId = slot.id as FoodMealSlotId
+        if (
+          prev[slotId] &&
+          foodLog.entries.some((entry) => entry.mealSlotId === slotId)
+        ) {
+          delete next[slotId]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [foodLog.entries])
+
+  useEffect(() => {
+    if (clearAllUndoSnapshot && foodLog.entries.length > 0) {
+      setClearAllUndoSnapshot(null)
+    }
+  }, [foodLog.entries, clearAllUndoSnapshot])
+
+  const handleClearOrUndoMealSlot = useCallback(
+    (slotId: FoodMealSlotId, label: string) => {
+      const undo = slotUndoSnapshots[slotId]
+      if (undo) {
+        restoreTodayFoodLog({
+          ...foodLog,
+          entries: [
+            ...undo.map((entry) => ({ ...entry })),
+            ...foodLog.entries,
+          ],
+        })
+        setSlotUndoSnapshots((prev) => {
+          const next = { ...prev }
+          delete next[slotId]
+          return next
+        })
+        toast.message(`「${label}」 메뉴를 되돌렸습니다`)
+        return
+      }
+
+      const toRemove = foodLog.entries.filter(
+        (entry) => entry.mealSlotId === slotId
+      )
+      if (toRemove.length === 0) return
+
+      setSlotUndoSnapshots((prev) => ({
+        ...prev,
+        [slotId]: toRemove.map((entry) => ({ ...entry })),
+      }))
+      setClearAllUndoSnapshot(null)
+      clearMealSlotFoodLogEntries(slotId)
+      toast.message(`「${label}」 메뉴를 비웠습니다`)
+    },
+    [foodLog, slotUndoSnapshots]
+  )
+
+  const handleClearAllOrUndoFoodLog = useCallback(() => {
+    if (clearAllUndoSnapshot) {
+      restoreTodayFoodLog({
+        ...foodLog,
+        entries: clearAllUndoSnapshot.map((entry) => ({ ...entry })),
+      })
+      setClearAllUndoSnapshot(null)
+      setSlotUndoSnapshots({})
+      toast.message("식단을 되돌렸습니다")
+      return
+    }
+
+    if (foodLog.entries.length === 0) return
+
+    setClearAllUndoSnapshot(
+      foodLog.entries.map((entry) => ({ ...entry }))
+    )
+    setSlotUndoSnapshots({})
+    clearTodayFoodLog()
+    toast.message("오늘 식단을 모두 비웠습니다")
+  }, [clearAllUndoSnapshot, foodLog])
+
+  const mealSlotUndoAvailable = useMemo(
+    () =>
+      Object.fromEntries(
+        FOOD_MEAL_SLOTS.map((slot) => [
+          slot.id,
+          Boolean(slotUndoSnapshots[slot.id as FoodMealSlotId]),
+        ])
+      ) as Partial<Record<FoodMealSlotId, boolean>>,
+    [slotUndoSnapshots]
+  )
 
   useEffect(() => {
     if (!hydrated) return
     const sync = () => setFoodLog(loadTodayFoodLog())
+    const resetUndo = () => {
+      setSlotUndoSnapshots({})
+      setClearAllUndoSnapshot(null)
+    }
     sync()
     window.addEventListener(DAILY_FOOD_LOG_EVENT, sync)
-    return () => window.removeEventListener(DAILY_FOOD_LOG_EVENT, sync)
+    window.addEventListener(DAILY_DATE_CHANGED_EVENT, resetUndo)
+    return () => {
+      window.removeEventListener(DAILY_FOOD_LOG_EVENT, sync)
+      window.removeEventListener(DAILY_DATE_CHANGED_EVENT, resetUndo)
+    }
   }, [hydrated])
 
   useEffect(() => {
@@ -820,6 +965,19 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
     window.addEventListener(CUSTOM_FOOD_EVENT, sync)
     return () => window.removeEventListener(CUSTOM_FOOD_EVENT, sync)
   }, [hydrated])
+
+  useEffect(() => {
+    if (!hydrated) return
+    const sync = () => setNutritionOverrideVersion((v) => v + 1)
+    window.addEventListener(FOOD_NUTRITION_OVERRIDE_EVENT, sync)
+    return () => window.removeEventListener(FOOD_NUTRITION_OVERRIDE_EVENT, sync)
+  }, [hydrated])
+
+  useEffect(() => {
+    if (!selectedFood) return
+    const refreshed = getFoodById(selectedFood.id)
+    if (refreshed) setSelectedFood(refreshed)
+  }, [nutritionOverrideVersion, selectedFood?.id])
 
   const runSearch = (q: string) => {
     setLoading(true)
@@ -843,7 +1001,14 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [query, foodLog.entries, targets, customFoodVersion])
+  }, [query, foodLog.entries, targets, customFoodVersion, nutritionOverrideVersion])
+
+  const openNutritionOverride = (foodId: string) => {
+    const food = getFoodById(foodId)
+    if (!food || !isNutritionOverrideEditable(foodId)) return
+    setOverrideFood(food)
+    setOverrideDialogOpen(true)
+  }
 
   const openCreateCustomFood = (name = "") => {
     setEditCustomFood(null)
@@ -880,6 +1045,16 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
   }
 
   const openDetail = (food: FoodDatabaseItem) => {
+    setRecommendedMenuEdit(null)
+    setSelectedFood(food)
+    setDetailOpen(true)
+  }
+
+  const openRecommendedMenuItem = (
+    food: FoodDatabaseItem,
+    context: RecommendedMenuItemSelectContext
+  ) => {
+    setRecommendedMenuEdit(context)
     setSelectedFood(food)
     setDetailOpen(true)
   }
@@ -945,6 +1120,14 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
         </Button>
       </div>
 
+      {!query.trim() ? (
+        <RecommendedMealMenuPanel
+          ref={recommendedMenuRef}
+          targets={targets}
+          onSelectFood={openRecommendedMenuItem}
+        />
+      ) : null}
+
       {loading && results.length === 0 && query.trim() ? (
         <p className="text-[12px] text-muted-foreground text-center py-3 flex items-center justify-center gap-2">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -999,7 +1182,7 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
                     {fiberSearch ? (
                       <>
                         1회 · 식이섬유{" "}
-                        {Math.round(getFiberPer100g(food) * ((food.servingGrams ?? 100) / 100) * 10) / 10}
+                        {Math.round(getFiberPer100g(food) * ((getPieceWeightG(food) ?? 100) / 100) * 10) / 10}
                         g · {food.per100g.calories}kcal
                         · 100g당 {getFiberPer100g(food)}g
                       </>
@@ -1036,52 +1219,70 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
         }
         onCheckout={handleCheckout}
         onClear={() => setCart([])}
+        onEditNutrition={openNutritionOverride}
       />
 
       <div className="pt-1">
-        <div className="flex items-center justify-between gap-2 mb-2 px-1">
-          <p className="text-[12px] font-medium">오늘 적용한 음식</p>
-          {totals.count > 0 ? (
-            <span className="text-[11px] text-accent tabular-nums">
-              {totals.count}개 · {formatCalories(totals.calories)}kcal
-            </span>
-          ) : null}
-        </div>
-
-        {totals.count > 0 ? (
-          <NutritionDailySummary
-            entries={foodLog.entries}
-            targets={targets}
-            onSelectFood={openDetail}
-          />
+        {totals.count > 0 || clearAllUndoSnapshot ? (
+          <CollapsibleInlineSection
+            title="오늘 적용한 음식"
+            summary={`${totals.count}개 · ${formatCalories(totals.calories)}kcal`}
+            defaultOpen
+            sectionId="food-log-today"
+          >
+            <NutritionDailySummary
+              entries={foodLog.entries}
+              targets={targets}
+              onSelectFood={openDetail}
+              clearAllUndoAvailable={Boolean(clearAllUndoSnapshot)}
+              onClearAllOrUndo={handleClearAllOrUndoFoodLog}
+              mealSlotUndoAvailable={mealSlotUndoAvailable}
+              onClearOrUndoMealSlot={handleClearOrUndoMealSlot}
+            />
+          </CollapsibleInlineSection>
         ) : null}
-
-        <TodayFoodList
-          entries={foodLog.entries}
-          onRemove={(id) => {
-            removeFoodLogEntry(id)
-            toast.message("식단에서 제거했습니다")
-          }}
-          onAdjustServing={(id, delta) => {
-            adjustFoodLogServingCount(id, delta)
-          }}
-          onChangeMealSlot={(id, slotId) => {
-            updateFoodLogMealSlot(id, slotId)
-          }}
-        />
       </div>
 
       <FoodDetailDialog
         open={detailOpen}
-        onOpenChange={setDetailOpen}
+        onOpenChange={(open) => {
+          setDetailOpen(open)
+          if (!open) setRecommendedMenuEdit(null)
+        }}
         food={selectedFood}
         targets={targets}
         onAddToCart={handleAddToCart}
+        recommendedMenuContext={recommendedMenuEdit}
+        onApplyToRecommendedMenu={(servingCount) => {
+          if (!recommendedMenuEdit || !selectedFood) return
+          recommendedMenuRef.current?.applyMenuItem(
+            recommendedMenuEdit.slotId,
+            recommendedMenuEdit.itemIndex,
+            selectedFood.id,
+            servingCount
+          )
+          setRecommendedMenuEdit(null)
+        }}
         onEditCustom={
           selectedFood && isCustomFood(selectedFood)
             ? () => openEditCustomFood(selectedFood)
             : undefined
         }
+        onEditNutritionOverride={
+          selectedFood && isNutritionOverrideEditable(selectedFood.id)
+            ? () => openNutritionOverride(selectedFood.id)
+            : undefined
+        }
+      />
+
+      <FoodNutritionOverrideDialog
+        open={overrideDialogOpen}
+        onOpenChange={setOverrideDialogOpen}
+        food={overrideFood}
+        onSaved={() => {
+          setNutritionOverrideVersion((v) => v + 1)
+          setFoodLog(refreshTodayFoodLogNutrition())
+        }}
       />
 
       <CustomFoodFormDialog

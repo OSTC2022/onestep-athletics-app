@@ -19,6 +19,12 @@ import {
   type MacroTargets,
   type UserProfile,
 } from "@/lib/user-profile"
+import {
+  calculateTargetPeriodDietPlan,
+  formatTargetPeriodChangeRange,
+  getRecommendedTargetWeeks,
+  type TargetPeriodAdvice,
+} from "@/lib/diet-coaching"
 import { getTodayScheduleDay, type WeeklyScheduleDay } from "@/lib/weekly-schedule"
 import {
   getWeightChangeKg,
@@ -46,6 +52,9 @@ export interface NutritionProfile {
   expectedWeightChangeRange: string | null
   expectedWeightChangeLabel: string
   weightChangeKg: number
+  targetPeriodWarning: string | null
+  targetPeriodAdvice: TargetPeriodAdvice | null
+  usesTargetPeriodPlan: boolean
 }
 
 export interface MealSlot {
@@ -115,22 +124,26 @@ function buildNutritionProfile(
   const activeWeight = useStoredWeight
     ? getActiveWeightKg(user)
     : user.currentWeightKg
+  const profileWithWeight = { ...user, currentWeightKg: activeWeight }
+  const targetPeriodPlan = calculateTargetPeriodDietPlan(profileWithWeight)
   return {
     currentWeightKg: activeWeight,
     targetWeightKg: user.targetWeightKg,
     targetWeeks: user.targetWeeks,
-    weeklyWeightGoalKg: getWeeklyWeightGoalKg({
-      ...user,
-      currentWeightKg: activeWeight,
-    }),
+    weeklyWeightGoalKg: getWeeklyWeightGoalKg(profileWithWeight),
     goalLabel: getGoalLabel(user.goalType),
     goalModeLabel: getGoalModeLabel(user),
     dietModeLabel: getDietModeLabel(user.dietMode),
-    expectedWeightChangeRange: getExpectedWeightChangeRange(user.dietMode),
+    expectedWeightChangeRange: targetPeriodPlan.usesTargetPeriod
+      ? formatTargetPeriodChangeRange(targetPeriodPlan.weeklyWeightGoalKg)
+      : getExpectedWeightChangeRange(user.dietMode),
     expectedWeightChangeLabel: getExpectedWeightChangeLabel(user.dietMode),
     weightChangeKg: useStoredWeight
       ? getWeightChangeKg(7, user.currentWeightKg)
       : 0,
+    targetPeriodWarning: targetPeriodPlan.warning,
+    targetPeriodAdvice: targetPeriodPlan.advice,
+    usesTargetPeriodPlan: targetPeriodPlan.usesTargetPeriod,
   }
 }
 
@@ -149,6 +162,19 @@ export function saveCurrentWeight(weightKg: number): number {
   const user = loadUserProfile()
   saveUserProfile({ ...user, currentWeightKg: rounded })
   return rounded
+}
+
+/** 추천 목표 기간을 저장하고 칼로리·식단 재계산을 트리거합니다. */
+export function applyRecommendedTargetPeriod(): number | null {
+  const user = loadUserProfile()
+  const activeWeight = getActiveWeightKg(user)
+  const recommendedWeeks = getRecommendedTargetWeeks({
+    ...user,
+    currentWeightKg: activeWeight,
+  })
+  if (!recommendedWeeks) return null
+  saveUserProfile({ ...user, targetWeeks: recommendedWeeks })
+  return recommendedWeeks
 }
 
 export function ensureWeightLogSeeded(): void {

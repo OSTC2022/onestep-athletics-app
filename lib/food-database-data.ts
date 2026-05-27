@@ -14,6 +14,7 @@ type FoodItem = {
   name: string
   category: string
   aliases?: string[]
+  pieceWeightG?: number
   servingGrams?: number
   servingLabel?: string
   per100g: N
@@ -24,8 +25,8 @@ function f(
   id: string,
   name: string,
   category: string,
-  servingGrams: number,
-  _servingLabel: string,
+  pieceWeightG: number,
+  servingLabel: string,
   per100g: N,
   aliases?: string[],
   refinedCarbLevel?: "low" | "medium" | "high"
@@ -34,8 +35,9 @@ function f(
     id,
     name,
     category,
-    servingGrams,
-    servingLabel: "1개",
+    pieceWeightG,
+    servingGrams: pieceWeightG,
+    servingLabel,
     per100g,
     aliases,
     refinedCarbLevel,
