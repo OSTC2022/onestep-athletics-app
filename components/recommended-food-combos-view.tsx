@@ -297,7 +297,7 @@ export function NutritionRecommendationPanel({
       </Button>
 
       {/* 결과 */}
-      {loading && hasRequested ? (
+      {loading && hasRequested && !error ? (
         <p className="text-[12px] text-muted-foreground text-center py-4 flex items-center justify-center gap-2">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           영양 전략 분석 · 검색 중…

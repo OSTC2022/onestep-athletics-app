@@ -5,8 +5,8 @@ import {
   getSupabaseServerConfigError,
   getSupabaseServerUserMessage,
   isSupabaseReadConfigured,
-  isSupabaseServerConfigured,
 } from "@/lib/supabase-env"
+import { isSupabaseServerConfigured } from "@/lib/supabase-server"
 
 const EMPTY_CONSUMED = {
   calories: 0,

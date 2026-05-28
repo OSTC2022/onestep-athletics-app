@@ -1579,47 +1579,56 @@ export const RecommendedMealMenuPanel = forwardRef<
     async (seed = variantSeed) => {
       setApiLoading(true)
       setApiError(null)
-      const consumed = hydrated
-        ? sumLoggedNutrition(loadTodayFoodLog().entries)
-        : sumLoggedNutrition([])
+      try {
+        const consumed = hydrated
+          ? sumLoggedNutrition(loadTodayFoodLog().entries)
+          : sumLoggedNutrition([])
 
-      const { data, message } = await fetchFoodRecommendations({
-        targets: {
-          calories: targets.calories,
-          proteinG: targets.proteinG,
-          carbsG: targets.carbsG,
-          fatG: targets.fatG,
-          fiberG: targets.fiberG,
-          sodiumMg: targets.sodiumMg,
-          sugarG: targets.sugarG,
-        },
-        consumed,
-        goal: strategySettings.goal,
-        trainingStatus: strategySettings.trainingStatus,
-        mealTiming: strategySettings.mealTiming,
-        intensity: strategySettings.intensity,
-        mealContext: mealTimingToContext(strategySettings.mealTiming),
-        hasTrainingToday: hasTrainingToday(strategySettings.trainingStatus),
-        trainingIntensity: trainingStatusToIntensity(strategySettings.trainingStatus),
-        recentFoodIds: loadRecentRecommendedFoodIds(),
-        recentRecommendationIds: loadRecentRecommendationIds(),
-        variantSeed: seed,
-      })
+        const { data, message } = await fetchFoodRecommendations({
+          targets: {
+            calories: targets.calories,
+            proteinG: targets.proteinG,
+            carbsG: targets.carbsG,
+            fatG: targets.fatG,
+            fiberG: targets.fiberG,
+            sodiumMg: targets.sodiumMg,
+            sugarG: targets.sugarG,
+          },
+          consumed,
+          goal: strategySettings.goal,
+          trainingStatus: strategySettings.trainingStatus,
+          mealTiming: strategySettings.mealTiming,
+          intensity: strategySettings.intensity,
+          mealContext: mealTimingToContext(strategySettings.mealTiming),
+          hasTrainingToday: hasTrainingToday(strategySettings.trainingStatus),
+          trainingIntensity: trainingStatusToIntensity(
+            strategySettings.trainingStatus
+          ),
+          recentFoodIds: loadRecentRecommendedFoodIds(),
+          recentRecommendationIds: loadRecentRecommendationIds(),
+          variantSeed: seed,
+        })
 
-      setApiLoading(false)
-      if (data?.recommendations.length) {
-        setApiResponse(data)
-        setApiError(null)
-        saveRecentRecommendationIds(data.recommendations.map((r) => r.id))
-        saveRecentRecommendedFoodIds(
-          data.recommendations.flatMap((r) => r.items.map((i) => i.id))
-        )
-      } else {
-        setApiResponse(data)
+        if (data?.recommendations.length) {
+          setApiResponse(data)
+          setApiError(null)
+          saveRecentRecommendationIds(data.recommendations.map((r) => r.id))
+          saveRecentRecommendedFoodIds(
+            data.recommendations.flatMap((r) => r.items.map((i) => i.id))
+          )
+        } else {
+          setApiResponse(data)
+          setApiError(
+            message ??
+              "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요."
+          )
+        }
+      } catch {
         setApiError(
-          message ??
-            "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요."
+          "추천 데이터를 불러오는 중 문제가 발생했습니다.\n관리자에게 문의해주세요."
         )
+      } finally {
+        setApiLoading(false)
       }
     },
     [

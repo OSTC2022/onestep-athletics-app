@@ -1,40 +1,49 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import {
   assertSupabasePublicEnv,
-  assertSupabaseServerEnv,
   getSupabaseServerConfigError,
   isSupabasePublicConfigured,
   isSupabaseReadConfigured,
-  isSupabaseServerConfigured,
+  resolveSupabaseServerUrl,
 } from "@/lib/supabase-env"
+import { DEFAULT_SUPABASE_SERVICE_ROLE_KEY } from "@/lib/supabase-server-defaults"
 
 let adminClient: SupabaseClient | null | undefined
 let readClient: SupabaseClient | null | undefined
+
+function resolveServiceRoleKey(): string | undefined {
+  return (
+    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
+    DEFAULT_SUPABASE_SERVICE_ROLE_KEY
+  )
+}
 
 /** @deprecated isSupabaseReadConfigured 사용 */
 export function isSupabaseConfigured(): boolean {
   return isSupabaseReadConfigured()
 }
 
+export function isSupabaseServerConfigured(): boolean {
+  return Boolean(resolveSupabaseServerUrl() && resolveServiceRoleKey())
+}
+
 export {
-  isSupabaseServerConfigured,
   isSupabaseReadConfigured,
   getSupabaseServerConfigError,
 } from "@/lib/supabase-env"
 
 /**
  * 서버 전용 Supabase admin 클라이언트 (쓰기·캐시 저장)
- * SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY 만 사용합니다.
  */
 export function getSupabaseAdmin(): SupabaseClient | null {
   if (adminClient !== undefined) return adminClient
 
-  if (!isSupabaseServerConfigured()) {
+  const url = resolveSupabaseServerUrl()
+  const serviceRoleKey = resolveServiceRoleKey()
+  if (!url || !serviceRoleKey) {
     adminClient = null
     return null
   }
-
-  const { url, serviceRoleKey } = assertSupabaseServerEnv()
 
   adminClient = createClient(url, serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
