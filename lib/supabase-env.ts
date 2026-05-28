@@ -10,6 +10,11 @@
  * ⚠️ SUPABASE_SERVICE_ROLE_KEY 에 NEXT_PUBLIC_ 접두사를 붙이지 마세요.
  */
 
+import {
+  DEFAULT_SUPABASE_ANON_KEY,
+  DEFAULT_SUPABASE_URL,
+} from "@/lib/supabase-defaults"
+
 function missingVars(names: string[]): string {
   return names.join(", ")
 }
@@ -30,7 +35,18 @@ export function resolveSupabaseServerUrl(): string | undefined {
   return (
     process.env.SUPABASE_URL?.trim() ||
     process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
-    undefined
+    DEFAULT_SUPABASE_URL
+  )
+}
+
+export function resolveSupabasePublicUrl(): string {
+  return process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() || DEFAULT_SUPABASE_URL
+}
+
+export function resolveSupabaseAnonKey(): string {
+  return (
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ||
+    DEFAULT_SUPABASE_ANON_KEY
   )
 }
 
@@ -43,14 +59,8 @@ export function isSupabaseServerConfigured(): boolean {
 
 export function getSupabaseServerConfigError(): string | null {
   const missing: string[] = []
-  if (!resolveSupabaseServerUrl() && !process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()) {
-    missing.push("NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)")
-  }
-  if (
-    !process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() &&
-    !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()
-  ) {
-    missing.push("NEXT_PUBLIC_SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY)")
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
+    missing.push("SUPABASE_SERVICE_ROLE_KEY (optional if anon read policy applied)")
   }
   if (missing.length === 0) return null
   return `[Supabase server] Missing env: ${missingVars(missing)}. Set in .env.local (dev) or Vercel Environment Variables (production). Do not use NEXT_PUBLIC_ for SERVICE_ROLE_KEY.`
@@ -74,41 +84,27 @@ export function assertSupabaseServerEnv(): {
 }
 
 export function isSupabasePublicConfigured(): boolean {
-  return Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() &&
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()
-  )
+  return Boolean(resolveSupabasePublicUrl() && resolveSupabaseAnonKey())
 }
 
-/** food_items 읽기 — service role 또는 anon(public) 키 */
+/** food_items 읽기 — service role 또는 anon(public) 키·기본값 */
 export function isSupabaseReadConfigured(): boolean {
   return isSupabaseServerConfigured() || isSupabasePublicConfigured()
 }
 
 export function getSupabasePublicConfigError(): string | null {
-  const missing: string[] = []
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()) {
-    missing.push("NEXT_PUBLIC_SUPABASE_URL")
-  }
-  if (!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()) {
-    missing.push("NEXT_PUBLIC_SUPABASE_ANON_KEY")
-  }
-  if (missing.length === 0) return null
-  return `Supabase 클라이언트 설정이 필요합니다. Dashboard → API → anon public 키를 확인해 주세요.`
+  return null
 }
 
 export function assertSupabasePublicEnv(): {
   url: string
   anonKey: string
 } {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()
+  const url = resolveSupabasePublicUrl()
+  const anonKey = resolveSupabaseAnonKey()
 
   if (!url || !anonKey) {
-    throw new Error(
-      getSupabasePublicConfigError() ??
-        "Supabase 클라이언트 환경변수가 설정되지 않았습니다."
-    )
+    throw new Error("Supabase 클라이언트 환경변수가 설정되지 않았습니다.")
   }
 
   return { url, anonKey }

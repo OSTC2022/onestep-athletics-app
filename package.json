@@ -9,7 +9,9 @@
     "lint": "eslint .",
     "import:foods": "tsx scripts/import-foods.ts",
     "import:foods:dry-run": "tsx scripts/import-foods.ts --dry-run",
-    "test:recommend": "tsx scripts/test-recommend-engine.ts"
+    "test:recommend": "tsx scripts/test-recommend-engine.ts",
+    "sync:vercel-env": "tsx scripts/sync-vercel-env.ts",
+    "apply:migration-003": "tsx scripts/apply-migration-003.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -76,6 +78,7 @@
     "csv-parse": "^6.2.1",
     "dotenv": "^17.4.2",
     "iconv-lite": "^0.7.2",
+    "pg": "^8.21.0",
     "postcss": "^8.5",
     "tailwindcss": "^4.2.0",
     "tsx": "^4.22.3",

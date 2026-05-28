@@ -5,6 +5,7 @@ import {
   getSupabaseServerConfigError,
   getSupabaseServerUserMessage,
   isSupabaseReadConfigured,
+  isSupabaseServerConfigured,
 } from "@/lib/supabase-env"
 
 const EMPTY_CONSUMED = {
@@ -31,6 +32,12 @@ export async function POST(request: Request) {
         recommendations: [],
       },
       { status: 503 }
+    )
+  }
+
+  if (!isSupabaseServerConfigured()) {
+    console.warn(
+      "[recommend-foods] SUPABASE_SERVICE_ROLE_KEY 없음 — anon/publishable 키로 읽기 시도"
     )
   }
 
