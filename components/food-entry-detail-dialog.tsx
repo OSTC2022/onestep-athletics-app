@@ -130,7 +130,7 @@ export function FoodEntryDetailDialog({
   onAdjustServing: (id: string, delta: number) => void
   onChangeMealSlot?: (id: string, slotId: MealSlotId) => void
   onEditNutrition?: (foodId: string) => void
-  /** true면 「적용 안 함」+「변경」 (닫기만, 식단에서 제거하지 않음) */
+  /** true면 「취소」+「변경」 (닫기만, 식단에서 제거하지 않음) */
   showDismissActions?: boolean
   /** 같은 끼니에 음식 추가 */
   onAddMenu?: () => void
@@ -306,7 +306,7 @@ export function FoodEntryDetailDialog({
                 className="flex-1"
                 onClick={() => onOpenChange(false)}
               >
-                적용 안 함
+                취소
               </Button>
             ) : null}
             <Button

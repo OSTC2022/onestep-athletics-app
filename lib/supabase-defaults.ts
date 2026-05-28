@@ -5,6 +5,6 @@
  */
 export const DEFAULT_SUPABASE_URL =
   "https://pvzwtbbvgcyszlvvqlyi.supabase.co"
-
+  
 export const DEFAULT_SUPABASE_ANON_KEY =
   "sb_publishable_4GeAVGDLPXiqviVSiihOcw_W16qZaQR"

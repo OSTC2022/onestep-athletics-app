@@ -1,5 +1,6 @@
 import type { FoodMealSlotId } from "@/lib/meal-slot-targets"
 import type { MealSlotMacroTargets } from "@/lib/meal-slot-targets"
+import type { MealSlotId } from "@/lib/nutrition"
 import type {
   MealTiming,
   NutritionGoal,
@@ -31,6 +32,8 @@ export type MealTargetRange = {
 
 export type MealRecommendationContext = {
   comboId: string
+  /** comboId + 끼니 슬롯 — 같은 메뉴를 끼니별로 따로 적용할 때 구분 */
+  applicationKey?: string
   title: string
   purpose: string
   intendedMealSlot: IntendedMealSlot
@@ -40,6 +43,29 @@ export type MealRecommendationContext = {
   targetRange: MealTargetRange
   goalMode?: string
   isRecommendedMeal: true
+}
+
+export function comboApplicationKey(
+  comboId: string,
+  mealSlotId: MealSlotId
+): string {
+  return `${comboId}::${mealSlotId}`
+}
+
+/** 같은 추천 메뉴가 같은 끼니에 이미 적용됐는지 (다른 끼니는 별개) */
+export function entryMatchesComboApplication(
+  entry: import("@/lib/daily-food-log").LoggedFoodEntry,
+  comboId: string,
+  mealSlotId: MealSlotId
+): boolean {
+  const ctx = entry.recommendationContext
+  if (!ctx?.isRecommendedMeal || ctx.comboId !== comboId) return false
+
+  const key = comboApplicationKey(comboId, mealSlotId)
+  if (ctx.applicationKey) return ctx.applicationKey === key
+
+  const entrySlot = entry.mealSlotId ?? ctx.applyMealSlotId
+  return entrySlot === mealSlotId
 }
 
 const INTENDED_SLOT_LABELS: Record<IntendedMealSlot, string> = {
@@ -155,11 +181,17 @@ export function evaluationCriteriaForTemplate(
         purpose: "가벼운 간식",
       }
     case "fat_loss_realistic":
-    case "light_dinner":
       return {
         label: "감량식 기준",
         badge: "감량식 기준",
         purpose: "감량·체지방 관리",
+      }
+    case "light_dinner":
+    case "light_cleanup":
+      return {
+        label: "가벼운 정리식 기준",
+        badge: "가벼운 정리식 기준",
+        purpose: "칼로리·나트륨 정리",
       }
     case "high_protein_low_fat":
       return {
@@ -227,23 +259,27 @@ export function buildTargetRangeForCombo(
       ? undefined
       : Math.round(total.protein * 1.35)
 
+  const carbsTotal = total.carbs ?? 0
+  const fatTotal = total.fat ?? 0
+  const sodiumTotal = total.sodium ?? 0
+
   return {
     calories: { min: minCal, max: maxCal },
     protein: { min: proteinMin, max: proteinMax },
     carbs: {
       min:
         intended === "postWorkout" || intended === "recoveryMeal"
-          ? Math.round(total.carbs * 0.8)
+          ? Math.round(carbsTotal * 0.8)
           : undefined,
-      max: Math.round(total.carbs * 1.25 + (intended === "snack" ? 10 : 25)),
+      max: Math.round(carbsTotal * 1.25 + (intended === "snack" ? 10 : 25)),
     },
     fat: {
       min: intended === "snack" ? 0 : 5,
-      max: Math.round(total.fat * 1.2 + (intended === "snack" ? 5 : 12)),
+      max: Math.round(fatTotal * 1.2 + (intended === "snack" ? 5 : 12)),
     },
-    sodium: { max: Math.round(total.sodium * 1.15 + (intended === "snack" ? 200 : 350)) },
+    sodium: { max: Math.round(sodiumTotal * 1.15 + (intended === "snack" ? 200 : 350)) },
     fiber: { min: intended === "snack" ? 1 : Math.round(total.fiber * 0.7) },
-    sugar: { max: Math.round((total.carbs * 0.35 + 8) * 10) / 10 },
+    sugar: { max: Math.round((carbsTotal * 0.35 + 8) * 10) / 10 },
   }
 }
 
@@ -269,13 +305,18 @@ export function targetRangeToMacroTargets(range: MealTargetRange): MealSlotMacro
   }
 }
 
-export function buildRecommendationContext(combo: RecommendFoodCombo): MealRecommendationContext {
+export function buildRecommendationContext(
+  combo: RecommendFoodCombo,
+  applyMealSlotId?: FoodMealSlotId
+): MealRecommendationContext {
+  const slot = applyMealSlotId ?? combo.applyMealSlotId
   return {
     comboId: combo.id,
+    applicationKey: comboApplicationKey(combo.id, slot),
     title: combo.title,
     purpose: combo.recommendedPurpose,
     intendedMealSlot: combo.intendedMealSlot,
-    applyMealSlotId: combo.applyMealSlotId,
+    applyMealSlotId: slot,
     evaluationCriteriaLabel: combo.evaluationCriteria.label,
     evaluationBadgeLabel: combo.evaluationCriteria.badge,
     targetRange: combo.targetRange,

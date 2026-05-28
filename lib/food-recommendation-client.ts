@@ -1,4 +1,5 @@
 import type {
+  DietQualityEvaluationResponse,
   RecommendFoodsRequest,
   RecommendFoodsResponse,
 } from "@/lib/food-recommendation-types"
@@ -71,6 +72,52 @@ export async function fetchFoodRecommendations(
   if (!json.recommendations?.length) {
     return {
       data: json,
+      message:
+        json.message ??
+        "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요.",
+    }
+  }
+
+  return { data: json }
+}
+
+type DietQualityApiResponse = DietQualityEvaluationResponse & {
+  error?: string
+  message?: string
+}
+
+export async function fetchDietQualityEvaluation(
+  payload: RecommendFoodsRequest
+): Promise<{
+  data: DietQualityEvaluationResponse | null
+  message?: string
+}> {
+  const res = await fetch("/api/evaluate-diet-quality", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+
+  const json = (await res.json()) as DietQualityApiResponse
+
+  if (!res.ok) {
+    const message =
+      json.message ??
+      (json.error === "supabase_unconfigured" || res.status === 503
+        ? SUPABASE_RECOMMENDATION_USER_MESSAGE
+        : undefined) ??
+      (typeof json.error === "string" &&
+      !json.error.includes("SUPABASE") &&
+      !json.error.includes(".env")
+        ? json.error
+        : undefined) ??
+      "추천 데이터를 불러오지 못했습니다. 잠시 후 다시 시도해주세요."
+    return { data: null, message }
+  }
+
+  if (!json.recommendations?.length && !json.sections?.length) {
+    return {
+      data: json.quality ? json : null,
       message:
         json.message ??
         "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요.",

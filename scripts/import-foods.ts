@@ -26,6 +26,7 @@ import {
   type MfdsFoodAliasRecord,
   type MfdsFoodItemRecord,
 } from "../lib/mfds-food-csv"
+import { assessNutritionDataQuality } from "../lib/food-nutrition-quality"
 import { assertSupabaseServerEnv } from "../lib/supabase-env"
 
 config({ path: path.resolve(process.cwd(), ".env.local") })
@@ -117,7 +118,19 @@ function scoreNutritionCompleteness(item: MfdsFoodItemRecord): number {
     p.fiberG,
     p.saturatedFatG,
   ]
-  return values.filter((v) => v != null && v !== 0).length
+  return values.filter((v) => v != null).length
+}
+
+function enrichItemMetadata(item: MfdsFoodItemRecord): MfdsFoodItemRecord {
+  const assessment = assessNutritionDataQuality(item.per100g, item.name_ko, item.category)
+  return {
+    ...item,
+    metadata: {
+      ...item.metadata,
+      nutritionDataQuality: assessment.quality,
+      nutritionQualityReasons: assessment.reasons,
+    },
+  }
 }
 
 function pickRicherFoodItem(
@@ -182,7 +195,10 @@ async function upsertFoodItems(
 
   for (const batch of chunk(items, batchSize)) {
     const { error } = await supabase.from("food_items").upsert(
-      batch.map((item) => ({ ...item, updated_at: now })),
+      batch.map((item) => {
+        const enriched = enrichItemMetadata(item)
+        return { ...enriched, updated_at: now }
+      }),
       { onConflict: "official_code" }
     )
 
@@ -234,6 +250,16 @@ async function main() {
   console.log(`  batchSize=${options.batchSize}`)
   logDedupeStats("food_items", itemsBefore, itemsAfter)
   logDedupeStats("food_aliases", aliasesBefore, aliasesAfter)
+
+  const qualityCounts = items.reduce(
+    (acc, item) => {
+      const q = assessNutritionDataQuality(item.per100g, item.name_ko, item.category).quality
+      acc[q] = (acc[q] ?? 0) + 1
+      return acc
+    },
+    {} as Record<string, number>
+  )
+  console.log("  nutrition data quality:", qualityCounts)
 
   if (items.length === 0) {
     console.log("No rows to import.")

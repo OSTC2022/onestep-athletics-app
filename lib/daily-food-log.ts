@@ -5,10 +5,13 @@ import {
   getFoodById,
   getPieceWeightG,
   gramsForServingCount,
+  nutritionAtGrams,
 } from "@/lib/food-database"
 import { toLoggedNutrition, type LoggedNutrition } from "@/lib/food-nutrition-utils"
+import type { SavedMealMenuItem } from "@/lib/saved-meal-menu-store"
 import type { FoodMealSlotId } from "@/lib/meal-slot-targets"
 import type { MealSlotId } from "@/lib/nutrition"
+import { entryMatchesComboApplication } from "@/lib/recommendation-meal-targets"
 import { NUTRITION_EVENT } from "@/lib/nutrition"
 import { getTodayDateKey } from "@/lib/daily-date"
 
@@ -174,6 +177,25 @@ export type MealFoodLogSource = {
   }>
 }
 
+export function isMealPlanAppliedToFoodLog(
+  meal: MealFoodLogSource,
+  entries: LoggedFoodEntry[]
+): boolean {
+  if (meal.items.length === 0) return false
+  const slotEntries = entries.filter((entry) => entry.mealSlotId === meal.slotId)
+  if (slotEntries.length !== meal.items.length) return false
+
+  const planSig = meal.items
+    .map((item) => `${item.foodId}:${item.servings}`)
+    .sort()
+    .join("|")
+  const logSig = slotEntries
+    .map((entry) => `${entry.foodId}:${entry.servingCount}`)
+    .sort()
+    .join("|")
+  return planSig === logSig
+}
+
 export function mealToFoodLogEntries(
   meal: MealFoodLogSource
 ): Omit<LoggedFoodEntry, "id" | "appliedAt">[] {
@@ -188,6 +210,47 @@ export function mealToFoodLogEntries(
     mealSlotId: meal.slotId,
     nutrition: item.nutrition,
   }))
+}
+
+/** 저장된 끼니 메뉴 → 식단 기록 항목 */
+export function foodLogEntriesFromSavedItems(
+  mealSlotId: MealSlotId,
+  slotLabel: string,
+  items: SavedMealMenuItem[]
+): Omit<LoggedFoodEntry, "id" | "appliedAt">[] {
+  const entries: Omit<LoggedFoodEntry, "id" | "appliedAt">[] = []
+
+  for (const item of items) {
+    const food = getFoodById(item.foodId)
+    if (!food) continue
+
+    const pieceWeight = getPieceWeightG(food) ?? 100
+    const servings = Math.max(0.5, item.servings)
+    const grams = gramsForServingCount(food, servings, pieceWeight)
+    const applied = nutritionAtGrams(food, grams)
+
+    entries.push({
+      foodId: food.id,
+      name: food.name,
+      grams,
+      displayAmount: formatFullFoodPortion(food, servings, pieceWeight),
+      servingCount: servings,
+      scope: "meal",
+      scopeLabel: slotLabel,
+      mealSlotId,
+      nutrition: {
+        calories: applied.calories,
+        carbsG: applied.carbsG,
+        proteinG: applied.proteinG,
+        fatG: applied.fatG,
+        sodiumMg: applied.sodiumMg,
+        sugarG: applied.sugarG,
+        fiberG: applied.fiberG,
+      },
+    })
+  }
+
+  return entries
 }
 
 /** 같은 끼니 슬롯 기록을 교체한 뒤 새 항목을 추가합니다. */
@@ -221,17 +284,19 @@ export function replaceMealSlotFoodLogEntries(
   return next
 }
 
-/** 이전 추천 식단 기록을 제거한 뒤 새 추천 식단을 적용합니다. */
+/** 같은 combo·끼니에만 이전 추천 기록을 교체하고, 다른 끼니는 유지합니다. */
 export function replaceRecommendedMealEntries(
   entries: Omit<LoggedFoodEntry, "id" | "appliedAt">[],
+  options: { comboId: string; mealSlotId: MealSlotId },
   now = new Date()
 ): DailyFoodLog {
   const date = getTodayDateKey(now)
   const all = readAll()
   const current = all[date] ?? loadTodayFoodLog(now)
   const appliedAt = now.toISOString()
+  const { comboId, mealSlotId } = options
   const kept = current.entries.filter(
-    (e) => !e.recommendationContext?.isRecommendedMeal
+    (e) => !entryMatchesComboApplication(e, comboId, mealSlotId)
   )
 
   const next: DailyFoodLog = {
@@ -285,6 +350,43 @@ export function addFoodLogEntries(
   return next
 }
 
+/** 같은 끼니·음식이면 기존 항목을 교체하고 새 항목을 추가합니다. */
+export function upsertMealSlotFoodLogEntry(
+  entry: Omit<LoggedFoodEntry, "id" | "appliedAt">,
+  now = new Date()
+): DailyFoodLog {
+  const mealSlotId = entry.mealSlotId
+  if (!mealSlotId) {
+    return addFoodLogEntries([entry], now)
+  }
+
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const current = all[date] ?? loadTodayFoodLog(now)
+  const appliedAt = now.toISOString()
+  const kept = current.entries.filter(
+    (e) => !(e.mealSlotId === mealSlotId && e.foodId === entry.foodId)
+  )
+
+  const next: DailyFoodLog = {
+    ...current,
+    date,
+    entries: [
+      {
+        ...entry,
+        id: generateId(),
+        appliedAt,
+      },
+      ...kept,
+    ],
+    updatedAt: appliedAt,
+  }
+
+  all[date] = next
+  writeAll(all)
+  return next
+}
+
 export function removeFoodLogEntry(id: string, now = new Date()): DailyFoodLog {
   const date = getTodayDateKey(now)
   const all = readAll()
@@ -301,7 +403,7 @@ export function removeFoodLogEntry(id: string, now = new Date()): DailyFoodLog {
   return next
 }
 
-/** 추천 식단이면 같은 comboId 항목을 함께 제거합니다. */
+/** 추천 식단이면 같은 combo·끼니 항목만 함께 제거합니다. */
 export function removeFoodLogEntryOrCombo(
   entryId: string,
   now = new Date()
@@ -313,11 +415,14 @@ export function removeFoodLogEntryOrCombo(
   if (!entry) return current
 
   const comboId = entry.recommendationContext?.comboId
+  const mealSlotId = entry.mealSlotId ?? entry.recommendationContext?.applyMealSlotId
   const next: DailyFoodLog = {
     ...current,
     entries: current.entries.filter((e) => {
       if (e.id === entryId) return false
-      if (comboId && e.recommendationContext?.comboId === comboId) return false
+      if (comboId && mealSlotId && entryMatchesComboApplication(e, comboId, mealSlotId)) {
+        return false
+      }
       return true
     }),
     updatedAt: now.toISOString(),

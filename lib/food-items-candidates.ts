@@ -1,9 +1,13 @@
 import type { FoodNutritionPer100g } from "@/lib/food-database"
+import {
+  assessNutritionDataQuality,
+  type NutritionDataQuality,
+} from "@/lib/food-nutrition-quality"
 import type {
   FoodCandidate,
   RecommendationBucket,
 } from "@/lib/food-recommendation-types"
-import { getSupabaseReadClient } from "@/lib/supabase-server"
+import { getSupabaseAdmin } from "@/lib/supabase-server"
 import { proteinVariant } from "@/lib/food-recommendation-strategy"
 
 type FoodItemRow = {
@@ -13,7 +17,40 @@ type FoodItemRow = {
   representative_name: string | null
   piece_weight_g: number | null
   per100g: FoodNutritionPer100g
+  metadata?: Record<string, unknown> | null
 }
+
+export type CandidateFetchStats = {
+  totalFoodItems: number
+  baseCandidateCount: number
+  afterHardFilterCount: number
+  appliedFilters: string[]
+  fetchMethods: string[]
+}
+
+export type CandidateFetchResult = {
+  candidates: FoodCandidate[]
+  stats: CandidateFetchStats
+}
+
+const FOOD_SELECT =
+  "id, name_ko, category, representative_name, piece_weight_g, per100g, metadata"
+
+const ALL_BUCKETS: RecommendationBucket[] = [
+  "korean_meal",
+  "high_protein",
+  "fish_seafood",
+  "egg_tofu_bean",
+  "carbs_starch",
+  "soup_stew",
+  "salad_veggie",
+  "convenience",
+  "post_workout",
+  "light_dinner",
+  "fiber",
+  "fruit",
+  "dairy_yogurt",
+]
 
 const BUCKET_KEYWORDS: Record<RecommendationBucket, string[]> = {
   korean_meal: ["밥", "덮밥", "비빔", "볶음", "제육", "불고기", "김치", "된장", "국밥"],
@@ -41,6 +78,55 @@ const BUCKET_KEYWORDS: Record<RecommendationBucket, string[]> = {
   fish_seafood: ["연어", "고등어", "참치", "새우", "오징어", "생선", "회", "명태"],
 }
 
+/** DB 전체 페이지 샘플 — 키워드에 안 걸리는 음식도 포함 */
+const PAGINATED_SLICES: Array<{ offset: number; limit: number }> = [
+  { offset: 0, limit: 1200 },
+  { offset: 12000, limit: 1200 },
+  { offset: 28000, limit: 1200 },
+  { offset: 45000, limit: 1200 },
+]
+
+const RELAXED_PAGINATED_SLICES: Array<{ offset: number; limit: number }> = [
+  { offset: 0, limit: 1500 },
+  { offset: 8000, limit: 1500 },
+  { offset: 18000, limit: 1500 },
+  { offset: 32000, limit: 1500 },
+  { offset: 48000, limit: 1500 },
+  { offset: 62000, limit: 1500 },
+]
+
+const HARD_FILTER_LABELS = [
+  "칼로리 0 이하",
+  "핵심 영양값 없음",
+  "이름 분석 불가",
+  "1회 제공량 비정상",
+  "칼로리 비정상(900kcal/100g 초과)",
+  "영양 데이터 invalid/suspicious",
+]
+
+function normalizePer100g(raw: FoodNutritionPer100g | null | undefined): FoodCandidate["per100g"] {
+  const p = raw ?? ({} as FoodNutritionPer100g)
+  return {
+    calories: p.calories ?? null,
+    carbsG: p.carbsG ?? null,
+    proteinG: p.proteinG ?? null,
+    fatG: p.fatG ?? null,
+    sodiumMg: p.sodiumMg ?? null,
+    sugarG: p.sugarG ?? null,
+    fiberG: p.fiberG ?? null,
+  }
+}
+
+function qualityFromMetadata(
+  metadata: Record<string, unknown> | null | undefined
+): NutritionDataQuality | null {
+  const q = metadata?.nutritionDataQuality
+  if (q === "complete" || q === "partial" || q === "suspicious" || q === "invalid") {
+    return q
+  }
+  return null
+}
+
 function escapeIlike(value: string): string {
   return value.replace(/[%_\\]/g, "")
 }
@@ -59,31 +145,83 @@ function classifyBucket(name: string, category: string): RecommendationBucket {
 }
 
 function rowToCandidate(row: FoodItemRow, bucket: RecommendationBucket): FoodCandidate {
+  const per100g = normalizePer100g(row.per100g)
+  const cachedQuality = qualityFromMetadata(row.metadata)
+  const assessment =
+    cachedQuality != null
+      ? {
+          quality: cachedQuality,
+          reasons: Array.isArray(row.metadata?.nutritionQualityReasons)
+            ? (row.metadata!.nutritionQualityReasons as string[])
+            : [],
+        }
+      : assessNutritionDataQuality(per100g, row.name_ko, row.category)
+
   return {
     id: row.id,
     nameKo: row.name_ko,
     category: row.category,
     representativeName: row.representative_name,
     pieceWeightG: row.piece_weight_g ?? 100,
-    per100g: {
-      calories: row.per100g.calories ?? 0,
-      carbsG: row.per100g.carbsG ?? 0,
-      proteinG: row.per100g.proteinG ?? 0,
-      fatG: row.per100g.fatG ?? 0,
-      sodiumMg: row.per100g.sodiumMg ?? 0,
-      sugarG: row.per100g.sugarG,
-      fiberG: row.per100g.fiberG,
-    },
+    per100g,
     bucket,
     proteinVariant: proteinVariant(row.name_ko),
+    dataQuality: assessment.quality,
+    dataQualityReasons: assessment.reasons,
   }
+}
+
+export function passesHardFilter(row: FoodItemRow): boolean {
+  const name = row.name_ko?.trim() ?? ""
+  if (name.length < 2) return false
+  if (/^[\d\s\-_.·]+$/.test(name)) return false
+
+  const p = normalizePer100g(row.per100g)
+  const calories = p.calories ?? 0
+  const protein = p.proteinG
+  const carbs = p.carbsG
+  const fat = p.fatG
+
+  const hasAnyNutrient =
+    calories > 0 ||
+    (protein != null && protein > 0) ||
+    (carbs != null && carbs > 0) ||
+    (fat != null && fat > 0)
+  if (!hasAnyNutrient) return false
+  if (calories <= 0) return false
+  if (calories > 900) return false
+
+  const pieceWeight = row.piece_weight_g ?? 100
+  if (pieceWeight <= 0 || pieceWeight > 5000) return false
+
+  const assessment = assessNutritionDataQuality(p, row.name_ko, row.category)
+  if (assessment.quality === "invalid" || assessment.quality === "suspicious") {
+    return false
+  }
+
+  return true
+}
+
+export async function countTotalFoodItems(): Promise<number> {
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return 0
+
+  const { count, error } = await supabase
+    .from("food_items")
+    .select("id", { count: "exact", head: true })
+
+  if (error) {
+    console.error("[countTotalFoodItems]", error.message)
+    return 0
+  }
+  return count ?? 0
 }
 
 async function fetchByKeywords(
   keywords: string[],
   limit: number
 ): Promise<FoodItemRow[]> {
-  const supabase = getSupabaseReadClient()
+  const supabase = getSupabaseAdmin()
   if (!supabase || keywords.length === 0) return []
 
   const filters = keywords
@@ -95,41 +233,192 @@ async function fetchByKeywords(
 
   const { data, error } = await supabase
     .from("food_items")
-    .select(
-      "id, name_ko, category, representative_name, piece_weight_g, per100g"
-    )
+    .select(FOOD_SELECT)
     .or(filters)
     .limit(limit)
 
-  if (error || !data) {
-    console.error("[fetchFoodCandidates]", error?.message)
+  if (error) {
+    console.error("[fetchByKeywords]", error.message)
     return []
   }
 
   return data as FoodItemRow[]
 }
 
-/** Supabase food_items에서 추천 후보 수집 (서버 전용) */
+async function fetchPaginatedBatch(
+  offset: number,
+  limit: number
+): Promise<FoodItemRow[]> {
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return []
+
+  const end = offset + limit - 1
+  const { data, error } = await supabase
+    .from("food_items")
+    .select(FOOD_SELECT)
+    .order("id", { ascending: true })
+    .range(offset, end)
+
+  if (error) {
+    console.error("[fetchPaginatedBatch]", error.message, { offset, limit })
+    return []
+  }
+
+  return data as FoodItemRow[]
+}
+
+async function fetchByNutrientMin(
+  nutrientKey: "proteinG" | "carbsG" | "fiberG",
+  minValue: number,
+  limit: number
+): Promise<FoodItemRow[]> {
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return []
+
+  const { data, error } = await supabase
+    .from("food_items")
+    .select(FOOD_SELECT)
+    .filter("per100g->>calories", "gt", "0")
+    .filter(`per100g->>${nutrientKey}`, "gte", String(minValue))
+    .limit(limit)
+
+  if (error) {
+    console.warn(`[fetchByNutrientMin:${nutrientKey}]`, error.message)
+    return []
+  }
+
+  return data as FoodItemRow[]
+}
+
+function mergeRows(
+  seen: Set<string>,
+  rows: FoodItemRow[],
+  results: FoodCandidate[]
+): number {
+  let added = 0
+  for (const row of rows) {
+    if (seen.has(row.id)) continue
+    seen.add(row.id)
+    const assigned = classifyBucket(row.name_ko, row.category)
+    results.push(rowToCandidate(row, assigned))
+    added++
+  }
+  return added
+}
+
+export type FetchRecommendationOptions = {
+  limitPerBucket?: number
+  paginatedSlices?: Array<{ offset: number; limit: number }>
+  includeNutrientQueries?: boolean
+  includePaginated?: boolean
+}
+
+/** Supabase food_items에서 넓은 추천 후보 수집 (서버 전용) */
+export async function fetchRecommendationCandidatesWide(
+  buckets: RecommendationBucket[],
+  options: FetchRecommendationOptions = {}
+): Promise<CandidateFetchResult> {
+  const limitPerBucket = options.limitPerBucket ?? 700
+  const paginatedSlices =
+    options.paginatedSlices ??
+    (options.includePaginated === false ? [] : PAGINATED_SLICES)
+  const includeNutrientQueries = options.includeNutrientQueries !== false
+
+  const fetchMethods: string[] = []
+  const [totalFoodItems, ...fetchGroups] = await Promise.all([
+    countTotalFoodItems(),
+    ...buckets.map((bucket) =>
+      fetchByKeywords(BUCKET_KEYWORDS[bucket] ?? [], limitPerBucket).then(
+        (rows) => ({ type: `bucket:${bucket}`, rows })
+      )
+    ),
+    ...(paginatedSlices.length > 0
+      ? paginatedSlices.map((slice) =>
+          fetchPaginatedBatch(slice.offset, slice.limit).then((rows) => ({
+            type: `paginated:${slice.offset}`,
+            rows,
+          }))
+        )
+      : []),
+    ...(includeNutrientQueries
+      ? [
+          fetchByNutrientMin("proteinG", 8, 900).then((rows) => ({
+            type: "nutrient:protein",
+            rows,
+          })),
+          fetchByNutrientMin("carbsG", 12, 900).then((rows) => ({
+            type: "nutrient:carbs",
+            rows,
+          })),
+          fetchByNutrientMin("fiberG", 2, 700).then((rows) => ({
+            type: "nutrient:fiber",
+            rows,
+          })),
+        ]
+      : []),
+  ])
+
+  const seen = new Set<string>()
+  const rawMerged: FoodCandidate[] = []
+  let baseCandidateCount = 0
+
+  for (const group of fetchGroups) {
+    const added = mergeRows(seen, group.rows, rawMerged)
+    if (added > 0) fetchMethods.push(group.type)
+    baseCandidateCount += group.rows.length
+  }
+
+  const candidates = rawMerged.filter((c) => {
+    const row: FoodItemRow = {
+      id: c.id,
+      name_ko: c.nameKo,
+      category: c.category,
+      representative_name: c.representativeName,
+      piece_weight_g: c.pieceWeightG,
+      per100g: c.per100g,
+    }
+    return passesHardFilter(row)
+  })
+
+  return {
+    candidates,
+    stats: {
+      totalFoodItems,
+      baseCandidateCount,
+      afterHardFilterCount: candidates.length,
+      appliedFilters: HARD_FILTER_LABELS,
+      fetchMethods,
+    },
+  }
+}
+
+/** @deprecated fetchRecommendationCandidatesWide 사용 */
 export async function fetchRecommendationCandidates(
   buckets: RecommendationBucket[],
   limitPerBucket = 35
 ): Promise<FoodCandidate[]> {
-  const seen = new Set<string>()
-  const results: FoodCandidate[] = []
+  const result = await fetchRecommendationCandidatesWide(buckets, {
+    limitPerBucket,
+    includePaginated: false,
+    includeNutrientQueries: false,
+    paginatedSlices: [],
+  })
+  return result.candidates
+}
 
-  for (const bucket of buckets) {
-    const keywords = BUCKET_KEYWORDS[bucket] ?? []
-    const rows = await fetchByKeywords(keywords.slice(0, 6), limitPerBucket)
-    for (const row of rows) {
-      if (seen.has(row.id)) continue
-      if ((row.per100g?.calories ?? 0) <= 0) continue
-      seen.add(row.id)
-      const assigned = classifyBucket(row.name_ko, row.category)
-      results.push(rowToCandidate(row, assigned))
-    }
-  }
+export function getAllRecommendationBuckets(): RecommendationBucket[] {
+  return [...ALL_BUCKETS]
+}
 
-  return results
+export async function fetchRelaxedRecommendationCandidates(
+  buckets: RecommendationBucket[]
+): Promise<CandidateFetchResult> {
+  return fetchRecommendationCandidatesWide(buckets, {
+    limitPerBucket: 900,
+    paginatedSlices: RELAXED_PAGINATED_SLICES,
+    includeNutrientQueries: true,
+    includePaginated: true,
+  })
 }
 
 /** 부족 영양소에 맞는 버킷 우선순위 */

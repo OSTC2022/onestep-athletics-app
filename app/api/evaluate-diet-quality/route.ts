@@ -1,6 +1,18 @@
 import { NextResponse } from "next/server"
-import { generateFoodRecommendations } from "@/lib/food-recommendation-engine"
+import {
+  generateFoodRecommendations,
+  inferMealContext,
+  resolveStrategySettings,
+} from "@/lib/food-recommendation-engine"
+import { groupRecommendationsIntoSections } from "@/lib/diet-quality-recommendations"
+import {
+  buildNutritionQualityStatus,
+} from "@/lib/nutrition-quality-analysis"
 import type { RecommendFoodsRequest } from "@/lib/food-recommendation-types"
+import {
+  hasTrainingToday,
+  mealTimingToContext,
+} from "@/lib/food-recommendation-strategy"
 import {
   getSupabaseServerConfigError,
   getSupabaseServerUserMessage,
@@ -18,17 +30,18 @@ const EMPTY_CONSUMED = {
 }
 
 /**
- * POST /api/recommend-foods
- * 목표·훈련·식사 타이밍 기반 영양 전략 추천 (Supabase food_items, 서버 전용)
+ * POST /api/evaluate-diet-quality
+ * 식단 질 평가 + Supabase food_items 기반 조합 추천
  */
 export async function POST(request: Request) {
   if (!isSupabaseServerConfigured()) {
-    console.error("[recommend-foods]", getSupabaseServerConfigError())
+    console.error("[evaluate-diet-quality]", getSupabaseServerConfigError())
     return NextResponse.json(
       {
         error: "supabase_unconfigured",
         message: getSupabaseServerUserMessage(),
         recommendations: [],
+        sections: [],
       },
       { status: 503 }
     )
@@ -69,28 +82,48 @@ export async function POST(request: Request) {
     recentFoodIds: body.recentFoodIds,
     recentRecommendationIds: body.recentRecommendationIds,
     variantSeed: body.variantSeed ?? 0,
+    recommendationFocus: body.recommendationFocus,
   }
 
   try {
     const result = await generateFoodRecommendations(req)
+    const settings = resolveStrategySettings(req)
+    const hasTraining =
+      req.hasTrainingToday ?? hasTrainingToday(settings.trainingStatus)
+    const mealContext =
+      req.mealContext ?? mealTimingToContext(settings.mealTiming) ??
+      inferMealContext(undefined, hasTraining)
+
+    const quality = buildNutritionQualityStatus(req, settings, mealContext, hasTraining)
+    const sections = groupRecommendationsIntoSections(
+      result.recommendations,
+      result.analysis
+    )
 
     if (result.recommendations.length === 0) {
       return NextResponse.json({
         ...result,
+        quality,
+        sections,
         message:
           "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요.",
       })
     }
 
-    return NextResponse.json(result)
+    return NextResponse.json({
+      ...result,
+      quality,
+      sections,
+    })
   } catch (err) {
-    console.error("[recommend-foods]", err)
+    console.error("[evaluate-diet-quality]", err)
     return NextResponse.json(
       {
         error: "recommendation_failed",
         message:
           "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요.",
         recommendations: [],
+        sections: [],
       },
       { status: 502 }
     )

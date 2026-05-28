@@ -14,14 +14,15 @@ export { getFiberPer100g } from "@/lib/food-nutrition-utils"
 export { getFoodDisplayName } from "@/lib/food-name-localize"
 
 export interface FoodNutritionPer100g {
-  calories: number
-  carbsG: number
-  proteinG: number
-  fatG: number
-  sodiumMg: number
-  sugarG?: number
-  fiberG?: number
-  saturatedFatG?: number
+  /** null = 정보 없음 (0과 구분) */
+  calories: number | null
+  carbsG: number | null
+  proteinG: number | null
+  fatG: number | null
+  sodiumMg: number | null
+  sugarG?: number | null
+  fiberG?: number | null
+  saturatedFatG?: number | null
 }
 
 export interface FoodDatabaseItem {

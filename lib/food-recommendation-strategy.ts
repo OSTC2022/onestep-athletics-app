@@ -473,6 +473,8 @@ export function buildDeficitChips(analysis: NutritionDeficitAnalysis): DeficitCh
 
   if (analysis.flags.includes("calorie_low")) {
     chips.push({ label: "칼로리 부족", severity: "warn" })
+  } else if (analysis.flags.includes("calorie_high")) {
+    chips.push({ label: "칼로리 초과", severity: "caution" })
   } else if (analysis.calorieGap < -200) {
     chips.push({ label: "칼로리 여유 있음", severity: "caution" })
   }
@@ -491,6 +493,10 @@ export function buildDeficitChips(analysis: NutritionDeficitAnalysis): DeficitCh
 
   if (analysis.flags.includes("fat_high")) {
     chips.push({ label: "지방 과다", severity: "caution" })
+  }
+
+  if (analysis.flags.includes("sugar_high")) {
+    chips.push({ label: "당류 주의", severity: "caution" })
   }
 
   if (analysis.carbsGap > 40 && !analysis.flags.includes("carbs_low")) {

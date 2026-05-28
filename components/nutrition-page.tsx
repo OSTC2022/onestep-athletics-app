@@ -28,6 +28,7 @@ import {
   type TodayMealLog,
 } from "@/lib/nutrition"
 import { DAILY_FOOD_LOG_EVENT, loadTodayFoodLog } from "@/lib/daily-food-log"
+import { filterConfirmedFoodLogEntries, CONFIRMED_MEAL_SLOTS_EVENT } from "@/lib/confirmed-meal-slots"
 import { sumLoggedNutrition } from "@/lib/food-nutrition-utils"
 import { USER_PROFILE_EVENT } from "@/lib/user-profile"
 import { getTodayScheduleDay } from "@/lib/weekly-schedule"
@@ -83,7 +84,9 @@ export function NutritionPage() {
     if (!hydrated) {
       return `${targets.breakdown.dietModeLabel} · ${formatCalories(targets.calories)}kcal`
     }
-    const consumed = sumLoggedNutrition(loadTodayFoodLog().entries).calories
+    const consumed = sumLoggedNutrition(
+      filterConfirmedFoodLogEntries(loadTodayFoodLog().entries)
+    ).calories
     return formatNutritionTodaySummary(targets, consumed)
   }, [hydrated, targets, foodLogVersion])
 
@@ -98,11 +101,13 @@ export function NutritionPage() {
     window.addEventListener(USER_PROFILE_EVENT, syncProfile)
     window.addEventListener(WEIGHT_TRACKER_EVENT, syncProfile)
     window.addEventListener(DAILY_FOOD_LOG_EVENT, syncFoodLog)
+    window.addEventListener(CONFIRMED_MEAL_SLOTS_EVENT, syncFoodLog)
     return () => {
       window.removeEventListener(NUTRITION_EVENT, syncMeals)
       window.removeEventListener(USER_PROFILE_EVENT, syncProfile)
       window.removeEventListener(WEIGHT_TRACKER_EVENT, syncProfile)
       window.removeEventListener(DAILY_FOOD_LOG_EVENT, syncFoodLog)
+      window.removeEventListener(CONFIRMED_MEAL_SLOTS_EVENT, syncFoodLog)
     }
   }, [hydrated])
 

@@ -8,6 +8,7 @@ import {
   loadTodayFoodLog,
   setTodayWaterConsumedL,
 } from "@/lib/daily-food-log"
+import { filterConfirmedFoodLogEntries, CONFIRMED_MEAL_SLOTS_EVENT } from "@/lib/confirmed-meal-slots"
 import {
   buildTodayNutritionCheckpoints,
   formatMacroG,
@@ -99,10 +100,12 @@ export function NutritionTodayPanel({
     window.addEventListener(DAILY_FOOD_LOG_EVENT, syncLog)
     window.addEventListener(WEIGHT_TRACKER_EVENT, syncProfile)
     window.addEventListener(USER_PROFILE_EVENT, syncProfile)
+    window.addEventListener(CONFIRMED_MEAL_SLOTS_EVENT, syncLog)
     return () => {
       window.removeEventListener(DAILY_FOOD_LOG_EVENT, syncLog)
       window.removeEventListener(WEIGHT_TRACKER_EVENT, syncProfile)
       window.removeEventListener(USER_PROFILE_EVENT, syncProfile)
+      window.removeEventListener(CONFIRMED_MEAL_SLOTS_EVENT, syncLog)
     }
   }, [hydrated])
 
@@ -111,7 +114,9 @@ export function NutritionTodayPanel({
     if (!hydrated) {
       return sumLoggedNutrition([])
     }
-    return sumLoggedNutrition(loadTodayFoodLog().entries)
+    return sumLoggedNutrition(
+      filterConfirmedFoodLogEntries(loadTodayFoodLog().entries)
+    )
   }, [hydrated, logVersion])
 
   const waterConsumedL = useMemo(() => {

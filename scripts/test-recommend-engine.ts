@@ -5,6 +5,10 @@
 
 import { generateFoodRecommendationsFromCandidates } from "../lib/food-recommendation-engine"
 import type { FoodCandidate } from "../lib/food-recommendation-types"
+import {
+  assessNutritionDataQuality,
+  type NutritionDataQuality,
+} from "../lib/food-nutrition-quality"
 import { proteinVariant } from "../lib/food-recommendation-strategy"
 
 const MOCK: FoodCandidate[] = [
@@ -23,6 +27,27 @@ const MOCK: FoodCandidate[] = [
   mk("13", "삼각김밥", "convenience", 180, 4, 38, 2),
   mk("14", "그릭요거트", "dairy_yogurt", 97, 9, 6, 5),
   mk("15", "미역국", "soup_stew", 30, 2, 3, 1, 1, 900),
+  mkSuspicious(
+    "16",
+    "피자_더블불고기피자오리지널(L)",
+    "korean_meal",
+    320,
+    19.4,
+    0,
+    0,
+    1
+  ),
+  mk(
+    "17",
+    "피자(정상데이터)",
+    "korean_meal",
+    266,
+    11,
+    33,
+    10,
+    2,
+    600
+  ),
 ]
 
 function mk(
@@ -34,21 +59,95 @@ function mk(
   carbsG: number,
   fatG: number,
   fiberG = 1,
-  sodiumMg = 200
+  sodiumMg = 200,
+  quality?: NutritionDataQuality
 ): FoodCandidate {
+  const per100g = {
+    calories,
+    carbsG,
+    proteinG,
+    fatG,
+    sodiumMg,
+    fiberG,
+  }
+  const assessment = assessNutritionDataQuality(per100g, nameKo, bucket)
   return {
     id: `mfds:${id}`,
     nameKo,
     category: bucket,
     representativeName: null,
     pieceWeightG: 100,
-    per100g: { calories, proteinG, carbsG, fatG, sodiumMg, fiberG },
+    per100g,
     bucket,
     proteinVariant: proteinVariant(nameKo),
+    dataQuality: quality ?? assessment.quality,
+    dataQualityReasons: assessment.reasons,
   }
 }
 
+function mkSuspicious(
+  id: string,
+  nameKo: string,
+  bucket: FoodCandidate["bucket"],
+  calories: number,
+  proteinG: number,
+  carbsG: number,
+  fatG: number,
+  fiberG = 1,
+  sodiumMg = 200
+): FoodCandidate {
+  return mk(id, nameKo, bucket, calories, proteinG, carbsG, fatG, fiberG, sodiumMg, "suspicious")
+}
+
 const SCENARIOS = [
+  {
+    name: "A. 엄격한 감량식 + 점심 (피자 제외)",
+    req: {
+      goal: "fat_loss_priority" as const,
+      trainingStatus: "rest" as const,
+      mealTiming: "lunch" as const,
+      intensity: "strict_loss" as const,
+      targets: { calories: 1800, proteinG: 110, carbsG: 180, fatG: 55, fiberG: 25 },
+      consumed: { calories: 900, proteinG: 45, carbsG: 80, fatG: 30, sodiumMg: 700, sugarG: 20, fiberG: 8 },
+    },
+    assert: (names: string[]) => {
+      const bad = names.filter((n) => /피자|케이크|튀김|라면|디저트/.test(n))
+      if (bad.length > 0) throw new Error(`엄격한 감량식에 부적합: ${bad.join(", ")}`)
+    },
+  },
+  {
+    name: "B. 현실적 다이어트 + 점심 (피자는 소량 조절만)",
+    req: {
+      goal: "fat_loss_priority" as const,
+      trainingStatus: "rest" as const,
+      mealTiming: "lunch" as const,
+      intensity: "realistic_diet" as const,
+      targets: { calories: 1800, proteinG: 110, carbsG: 180, fatG: 55, fiberG: 25 },
+      consumed: { calories: 900, proteinG: 45, carbsG: 80, fatG: 30, sodiumMg: 700, sugarG: 20, fiberG: 8 },
+    },
+    assert: (names: string[], combos: { title: string; level: string }[]) => {
+      const top = combos[0]
+      if (top && /피자/.test(names[0] ?? "") && !/조절|현실/.test(top.title + top.level)) {
+        throw new Error("피자가 대표 추천으로 노출됨 (조절식이 아님)")
+      }
+    },
+  },
+  {
+    name: "C. 탄수0 지방0 의심 데이터 제외",
+    req: {
+      goal: "fat_loss_priority" as const,
+      trainingStatus: "rest" as const,
+      mealTiming: "lunch" as const,
+      intensity: "realistic_diet" as const,
+      targets: { calories: 1800, proteinG: 110, carbsG: 180, fatG: 55, fiberG: 25 },
+      consumed: { calories: 900, proteinG: 45, carbsG: 80, fatG: 30, sodiumMg: 700, sugarG: 20, fiberG: 8 },
+    },
+    assert: (names: string[]) => {
+      if (names.some((n) => n.includes("더블불고기피자"))) {
+        throw new Error("suspicious 피자가 추천에 포함됨")
+      }
+    },
+  },
   {
     name: "1. 감량 우선 + 휴식일 + 저녁",
     req: {
@@ -58,50 +157,6 @@ const SCENARIOS = [
       intensity: "satiety_focus" as const,
       targets: { calories: 1800, proteinG: 110, carbsG: 180, fatG: 55, fiberG: 25 },
       consumed: { calories: 1400, proteinG: 70, carbsG: 150, fatG: 45, sodiumMg: 900, sugarG: 30, fiberG: 10 },
-    },
-  },
-  {
-    name: "2. 체지방 감량 + 중강도 러닝 + 운동 후",
-    req: {
-      goal: "fat_loss_train_maintain" as const,
-      trainingStatus: "moderate_run" as const,
-      mealTiming: "post_workout" as const,
-      intensity: "athlete_balanced" as const,
-      targets: { calories: 2000, proteinG: 120, carbsG: 200, fatG: 60, fiberG: 25 },
-      consumed: { calories: 1200, proteinG: 55, carbsG: 90, fatG: 35, sodiumMg: 800, sugarG: 20, fiberG: 8 },
-    },
-  },
-  {
-    name: "3. 러닝 퍼포먼스 + 인터벌 전",
-    req: {
-      goal: "running_performance" as const,
-      trainingStatus: "interval_speed" as const,
-      mealTiming: "pre_workout" as const,
-      intensity: "carb_refuel" as const,
-      targets: { calories: 2200, proteinG: 120, carbsG: 280, fatG: 65, fiberG: 25 },
-      consumed: { calories: 900, proteinG: 40, carbsG: 80, fatG: 30, sodiumMg: 700, sugarG: 15, fiberG: 12 },
-    },
-  },
-  {
-    name: "4. 장거리 LSD 후",
-    req: {
-      goal: "post_workout_recovery" as const,
-      trainingStatus: "long_lsd" as const,
-      mealTiming: "post_workout" as const,
-      intensity: "carb_refuel" as const,
-      targets: { calories: 2400, proteinG: 130, carbsG: 300, fatG: 70, fiberG: 25 },
-      consumed: { calories: 1100, proteinG: 50, carbsG: 70, fatG: 35, sodiumMg: 1000, sugarG: 20, fiberG: 9 },
-    },
-  },
-  {
-    name: "5. 나트륨 과다",
-    req: {
-      goal: "light_management" as const,
-      trainingStatus: "rest" as const,
-      mealTiming: "dinner" as const,
-      intensity: "sodium_control" as const,
-      targets: { calories: 2000, proteinG: 120, carbsG: 200, fatG: 60, fiberG: 25, sodiumMg: 2000 },
-      consumed: { calories: 1600, proteinG: 85, carbsG: 180, fatG: 50, sodiumMg: 2800, sugarG: 35, fiberG: 14 },
     },
   },
   {
@@ -128,24 +183,43 @@ const SCENARIOS = [
   },
 ]
 
+let failed = 0
+
 for (const s of SCENARIOS) {
   const result = generateFoodRecommendationsFromCandidates(
     { ...s.req, variantSeed: 1 },
     MOCK
   )
+  const allNames = result.recommendations.flatMap((c) => c.items.map((i) => i.nameKo))
   console.log(`\n=== ${s.name} ===`)
   console.log("summary:", result.summary)
   console.log("deficits:", result.deficits.map((d) => d.label).join(", "))
   console.log("combos:", result.recommendations.length)
+  if (result.pipeline) {
+    console.log(
+      "pipeline:",
+      `${result.pipeline.afterHardFilterCount} fetched → quality ${result.pipeline.afterQualityFilterCount ?? "?"} → ${result.pipeline.afterScoringCount} scored → ${result.pipeline.selectedRecommendationCount} combos`
+    )
+  }
   for (const c of result.recommendations) {
-    const proteins = c.items
-      .filter((i) => i.protein >= 8)
-      .map((i) => i.nameKo)
-      .join(" / ")
     console.log(`  · [${c.level}] ${c.title}`)
     console.log(`    ${c.items.map((i) => i.nameKo).join(" + ")}`)
-    if (proteins) console.log(`    단백질: ${proteins}`)
+  }
+
+  try {
+    if ("assert" in s && s.assert) {
+      s.assert(allNames, result.recommendations)
+      console.log("  ✓ assertion passed")
+    }
+  } catch (e) {
+    failed++
+    console.error("  ✗", e instanceof Error ? e.message : e)
   }
 }
 
-console.log("\nDone.")
+if (failed > 0) {
+  console.error(`\n${failed} scenario(s) failed.`)
+  process.exit(1)
+}
+
+console.log("\nDone — all quality assertions passed.")

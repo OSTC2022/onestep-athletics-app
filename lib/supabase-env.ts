@@ -21,7 +21,7 @@ function missingVars(names: string[]): string {
 
 /** 사용자에게 보여줄 안내 (배포·로컬 공통) */
 export const SUPABASE_RECOMMENDATION_USER_MESSAGE =
-  "추천 데이터를 불러오는 중 문제가 발생했습니다.\n관리자에게 문의해주세요."
+  "추천 데이터를 불러오지 못했습니다. 잠시 후 다시 시도해주세요."
 
 export const SUPABASE_SEARCH_USER_MESSAGE =
   "공식 음식 검색을 일시적으로 사용할 수 없어요. 직접 추가하거나 잠시 후 다시 시도해 주세요."
@@ -60,7 +60,7 @@ export function isSupabaseServerConfigured(): boolean {
 export function getSupabaseServerConfigError(): string | null {
   const missing: string[] = []
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
-    missing.push("SUPABASE_SERVICE_ROLE_KEY (optional if anon read policy applied)")
+    missing.push("SUPABASE_SERVICE_ROLE_KEY")
   }
   if (missing.length === 0) return null
   return `[Supabase server] Missing env: ${missingVars(missing)}. Set in .env.local (dev) or Vercel Environment Variables (production). Do not use NEXT_PUBLIC_ for SERVICE_ROLE_KEY.`

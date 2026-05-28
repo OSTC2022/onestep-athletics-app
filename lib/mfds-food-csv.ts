@@ -33,7 +33,7 @@ export type MfdsFoodAliasRecord = {
   alias_type: string
 }
 
-const NONE_VALUES = new Set(["", "해당없음", "-", "null", "NULL"])
+const NONE_VALUES = new Set(["", "해당없음", "-", "null", "NULL", "N/A", "n/a", "NA"])
 
 const FOODS_SERVING_COLUMN = "1인(회)분량 참고량"
 const PROCESSED_SERVING_COLUMN = "1회 섭취참고량"
@@ -56,12 +56,46 @@ export function readMfdsCsvFile(
   }) as MfdsFoodCsvRow[]
 }
 
-function parseNumber(value: string | undefined | null): number {
-  if (value == null) return 0
+function parseOptionalNumber(value: string | undefined | null): number | null {
+  if (value == null) return null
   const trimmed = value.trim()
-  if (!trimmed || NONE_VALUES.has(trimmed)) return 0
+  if (!trimmed || NONE_VALUES.has(trimmed)) return null
   const n = Number(trimmed.replace(/,/g, ""))
-  return Number.isFinite(n) ? n : 0
+  if (!Number.isFinite(n)) return null
+  return n
+}
+
+/** @deprecated import 검증 외에는 parseOptionalNumber 사용 */
+function parseNumber(value: string | undefined | null): number {
+  return parseOptionalNumber(value) ?? 0
+}
+
+function pickNumeric(row: MfdsFoodCsvRow, keys: string[]): number | null {
+  for (const key of keys) {
+    const parsed = parseOptionalNumber(row[key])
+    if (parsed != null) return parsed
+  }
+  return null
+}
+
+function buildPer100g(row: MfdsFoodCsvRow): FoodNutritionPer100g {
+  const per100g: FoodNutritionPer100g = {
+    calories: pickNumeric(row, ["에너지(kcal)", "에너지", "열량(kcal)"]),
+    carbsG: pickNumeric(row, ["탄수화물(g)", "탄수화물"]),
+    proteinG: pickNumeric(row, ["단백질(g)", "단백질"]),
+    fatG: pickNumeric(row, ["지방(g)", "지방"]),
+    sodiumMg: pickNumeric(row, ["나트륨(mg)", "나트륨"]),
+  }
+
+  const sugarG = pickNumeric(row, ["당류(g)", "당류"])
+  const fiberG = pickNumeric(row, ["식이섬유(g)", "식이섬유"])
+  const saturatedFatG = pickNumeric(row, ["포화지방산(g)", "포화지방산"])
+
+  if (sugarG != null) per100g.sugarG = sugarG
+  if (fiberG != null) per100g.fiberG = fiberG
+  if (saturatedFatG != null) per100g.saturatedFatG = saturatedFatG
+
+  return per100g
 }
 
 function cleanText(value: string | undefined | null): string | null {
@@ -102,26 +136,6 @@ function pickCategory(row: MfdsFoodCsvRow): string {
   }
 
   return "식품"
-}
-
-function buildPer100g(row: MfdsFoodCsvRow): FoodNutritionPer100g {
-  const per100g: FoodNutritionPer100g = {
-    calories: parseNumber(row["에너지(kcal)"]),
-    carbsG: parseNumber(row["탄수화물(g)"]),
-    proteinG: parseNumber(row["단백질(g)"]),
-    fatG: parseNumber(row["지방(g)"]),
-    sodiumMg: parseNumber(row["나트륨(mg)"]),
-  }
-
-  const sugarG = parseNumber(row["당류(g)"])
-  const fiberG = parseNumber(row["식이섬유(g)"])
-  const saturatedFatG = parseNumber(row["포화지방산(g)"])
-
-  if (sugarG > 0) per100g.sugarG = sugarG
-  if (fiberG > 0) per100g.fiberG = fiberG
-  if (saturatedFatG > 0) per100g.saturatedFatG = saturatedFatG
-
-  return per100g
 }
 
 function buildMetadata(row: MfdsFoodCsvRow, kind: MfdsCsvKind): Record<string, string | null> {

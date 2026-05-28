@@ -1,7 +1,9 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { RefreshCw, Undo2, X, Plus } from "lucide-react"
+import { Undo2, X, Plus, Lock } from "lucide-react"
+import { toast } from "sonner"
+import { useHydrated } from "@/hooks/use-hydrated"
 import { Progress } from "@/components/ui/progress"
 import { CollapsibleInlineSection } from "@/components/collapsible-card"
 import { MacroRangeLabel } from "@/components/macro-range-label"
@@ -23,21 +25,37 @@ import {
   type MealEvaluationContext,
 } from "@/lib/meal-evaluation"
 import {
-  buildDietJudgmentSummary,
-  buildDietWarningContext,
   formatMacroG,
   nutritionPercent,
   sumLoggedNutrition,
   validateMacroCalories,
-  type DietJudgmentKind,
   type LoggedNutrition,
 } from "@/lib/food-nutrition-utils"
-import { getFoodRecommendationsForJudgment } from "@/lib/food-recommendations"
 import type { FoodDatabaseItem } from "@/lib/food-database"
+import type { RecommendFoodCombo } from "@/lib/food-recommendation-types"
+import { NutritionQualityPanel } from "@/components/nutrition-quality-panel"
 import { MealSlotInlineFoodSearch } from "@/components/meal-slot-inline-food-search"
 import { cn } from "@/lib/utils"
 import type { LoggedFoodEntry } from "@/lib/daily-food-log"
+import {
+  foodLogEntriesFromSavedItems,
+  replaceMealSlotFoodLogEntries,
+} from "@/lib/daily-food-log"
 import { MEAL_SLOTS } from "@/lib/nutrition"
+import {
+  deleteSavedMealSlot,
+  listSavedMealSlots,
+  saveMealSlotFromLogEntries,
+  SAVED_MEAL_MENU_EVENT,
+  type SavedMealSlotRecord,
+} from "@/lib/saved-meal-menu-store"
+import { MealSlotSaveLoadBar } from "@/components/meal-slot-save-load-bar"
+import { MealSlotConfirmButtons } from "@/components/meal-slot-confirm-buttons"
+import {
+  CONFIRMED_MEAL_SLOTS_EVENT,
+  confirmMealSlot,
+  isMealSlotConfirmed,
+} from "@/lib/confirmed-meal-slots"
 
 const FOOD_MEAL_SLOTS = MEAL_SLOTS.filter((slot) =>
   (["breakfast", "lunch", "dinner", "snack"] as FoodMealSlotId[]).includes(
@@ -220,17 +238,24 @@ function MealEntryList({
   entries,
   onSelectEntry,
   onRemoveEntry,
+  locked = false,
 }: {
   entries: LoggedFoodEntry[]
   onSelectEntry?: (entry: LoggedFoodEntry) => void
   onRemoveEntry?: (entry: LoggedFoodEntry) => void
+  locked?: boolean
 }) {
   return (
     <ul className="space-y-1">
       {entries.map((entry) => (
         <li key={entry.id}>
-          <div className="relative rounded-lg border border-border/40 bg-secondary/15 hover:border-accent/30 transition-colors">
-            {onRemoveEntry ? (
+          <div
+            className={cn(
+              "relative rounded-lg border border-border/40 bg-secondary/15 transition-colors",
+              !locked && "hover:border-accent/30"
+            )}
+          >
+            {!locked && onRemoveEntry ? (
               <button
                 type="button"
                 onClick={(e) => {
@@ -245,8 +270,15 @@ function MealEntryList({
             ) : null}
             <button
               type="button"
-              onClick={() => onSelectEntry?.(entry)}
-              className="w-full px-2 py-1.5 pr-7 text-left hover:bg-accent/5 rounded-lg transition-colors"
+              disabled={locked}
+              onClick={() => !locked && onSelectEntry?.(entry)}
+              className={cn(
+                "w-full px-2 py-1.5 text-left rounded-lg transition-colors",
+                !locked && onRemoveEntry ? "pr-7" : "",
+                locked
+                  ? "cursor-default opacity-90"
+                  : "hover:bg-accent/5"
+              )}
             >
               <p className="text-[11px] font-medium leading-snug">{entry.name}</p>
               <p className="text-[10px] text-muted-foreground tabular-nums mt-0.5">
@@ -274,6 +306,8 @@ function PerMealSummaryCard({
   coachingContext,
   undoAvailable = false,
   onClearOrUndo,
+  onConfirmMealSlot,
+  onUnlockMealSlot,
   onSelectEntry,
   onRemoveEntry,
   inlineAddOpen = false,
@@ -290,6 +324,8 @@ function PerMealSummaryCard({
   coachingContext?: MealEvaluationContext
   undoAvailable?: boolean
   onClearOrUndo?: () => void
+  onConfirmMealSlot?: (slotId: FoodMealSlotId, label: string) => void
+  onUnlockMealSlot?: (slotId: FoodMealSlotId, label: string) => void
   onSelectEntry?: (entry: LoggedFoodEntry) => void
   onRemoveEntry?: (entry: LoggedFoodEntry) => void
   inlineAddOpen?: boolean
@@ -298,6 +334,9 @@ function PerMealSummaryCard({
   searchTargets?: MacroTargets
   allLogEntries?: LoggedFoodEntry[]
 }) {
+  const hydrated = useHydrated()
+  const [savedListVersion, setSavedListVersion] = useState(0)
+  const [confirmedVersion, setConfirmedVersion] = useState(0)
   const [showGraph, setShowGraph] = useState(false)
   const nextMeal = slotId ? NEXT_MEAL_SLOT[slotId] : undefined
   const evaluation = useMemo(() => {
@@ -346,6 +385,57 @@ function PerMealSummaryCard({
     if (nutrition.count > 0) setShowGraph((prev) => !prev)
   }
 
+  useEffect(() => {
+    if (!hydrated || !slotId) return
+    const handler = () => setSavedListVersion((version) => version + 1)
+    window.addEventListener(SAVED_MEAL_MENU_EVENT, handler)
+    return () => window.removeEventListener(SAVED_MEAL_MENU_EVENT, handler)
+  }, [hydrated, slotId])
+
+  useEffect(() => {
+    if (!hydrated) return
+    const handler = () => setConfirmedVersion((version) => version + 1)
+    window.addEventListener(CONFIRMED_MEAL_SLOTS_EVENT, handler)
+    return () => window.removeEventListener(CONFIRMED_MEAL_SLOTS_EVENT, handler)
+  }, [hydrated])
+
+  void confirmedVersion
+  const mealConfirmed = slotId ? isMealSlotConfirmed(slotId) : false
+
+  const savedSlots = useMemo(() => {
+    if (!hydrated || !slotId) return []
+    return listSavedMealSlots().filter((item) => item.slotId === slotId)
+  }, [hydrated, slotId, savedListVersion])
+
+  const handleSaveSlot = (name: string) => {
+    if (!slotId) return
+    const record = saveMealSlotFromLogEntries(
+      slotId,
+      label,
+      mealEntries.map((entry) => ({
+        foodId: entry.foodId,
+        servingCount: entry.servingCount,
+        name: entry.name,
+      })),
+      name
+    )
+    toast.success(`「${record.name}」을 저장했습니다`)
+  }
+
+  const handleLoadSlot = (record: SavedMealSlotRecord) => {
+    replaceMealSlotFoodLogEntries(
+      record.slotId,
+      foodLogEntriesFromSavedItems(record.slotId, record.label, record.items)
+    )
+    confirmMealSlot(record.slotId)
+    toast.success(`「${record.name}」을 불러왔습니다`)
+  }
+
+  const handleDeleteSavedSlot = (id: string) => {
+    deleteSavedMealSlot(id)
+    toast.message("저장된 끼니 메뉴를 삭제했습니다")
+  }
+
   return (
     <div
       className={cn(
@@ -365,6 +455,12 @@ function PerMealSummaryCard({
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <p className="text-[12px] font-semibold text-accent">{label}</p>
+            {mealConfirmed ? (
+              <span className="inline-flex items-center gap-0.5 rounded-full border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
+                <Lock className="h-2.5 w-2.5" />
+                결정됨
+              </span>
+            ) : null}
             <span className={cn("text-[10px] font-medium", statusColor)}>
               {statusLabel}
             </span>
@@ -396,12 +492,18 @@ function PerMealSummaryCard({
       {nutrition.count > 0 && !showGraph ? (
         <MealEntryList
           entries={mealEntries}
-          onSelectEntry={onSelectEntry}
-          onRemoveEntry={onRemoveEntry}
+          locked={mealConfirmed}
+          onSelectEntry={mealConfirmed ? undefined : onSelectEntry}
+          onRemoveEntry={mealConfirmed ? undefined : onRemoveEntry}
         />
       ) : null}
 
-      {!showGraph && slotId && inlineAddOpen && searchTargets && onPickFoodForSlot ? (
+      {!showGraph &&
+      slotId &&
+      !mealConfirmed &&
+      inlineAddOpen &&
+      searchTargets &&
+      onPickFoodForSlot ? (
         <MealSlotInlineFoodSearch
           slotLabel={label}
           targets={searchTargets}
@@ -409,7 +511,7 @@ function PerMealSummaryCard({
           onClose={() => onToggleInlineAdd?.(slotId)}
           onSelectFood={(food) => onPickFoodForSlot(food, slotId)}
         />
-      ) : !showGraph && slotId && onToggleInlineAdd ? (
+      ) : !showGraph && slotId && !mealConfirmed && onToggleInlineAdd ? (
         <button
           type="button"
           onClick={() => onToggleInlineAdd(slotId)}
@@ -539,137 +641,35 @@ function PerMealSummaryCard({
         <p className="text-[10px] text-muted-foreground">아직 기록이 없어요.</p>
       ) : null}
 
-      {slotId && onClearOrUndo ? (
-        <button
-          type="button"
-          disabled={!undoAvailable && nutrition.count === 0}
-          onClick={onClearOrUndo}
-          className={cn(
-            "w-full h-8 rounded-lg text-[10px] font-medium transition-colors inline-flex items-center justify-center gap-1",
-            undoAvailable
-              ? "border border-accent/35 bg-accent/10 text-accent hover:bg-accent/20"
-              : "border border-border/60 bg-background/30 text-muted-foreground hover:text-destructive hover:border-destructive/40 hover:bg-destructive/5",
-            "disabled:opacity-40 disabled:pointer-events-none"
-          )}
-        >
-          {undoAvailable ? (
-            <>
-              <Undo2 className="h-3 w-3" />
-              되돌리기
-            </>
-          ) : (
-            "메뉴 비우기"
-          )}
-        </button>
+      {slotId && !mealConfirmed ? (
+        <MealSlotSaveLoadBar
+          slotId={slotId}
+          mealLabel={label}
+          savedSlots={savedSlots}
+          saveDisabled={mealEntries.length === 0}
+          onSave={handleSaveSlot}
+          onLoadSlot={handleLoadSlot}
+          onDeleteSlot={handleDeleteSavedSlot}
+        />
       ) : null}
-    </div>
-  )
-}
 
-function JudgmentChip({
-  label,
-  tone,
-  active,
-  actionable,
-  onClick,
-}: {
-  label: string
-  tone: "ok" | "warn" | "caution" | "neutral"
-  active?: boolean
-  actionable?: boolean
-  onClick?: () => void
-}) {
-  const className = cn(
-    "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors",
-    tone === "ok" && "border-accent/40 bg-accent/10 text-accent",
-    tone === "warn" && "border-amber-500/40 bg-amber-500/10 text-amber-400",
-    tone === "caution" &&
-      "border-orange-500/35 bg-orange-500/10 text-orange-300",
-    tone === "neutral" && "border-border/60 bg-secondary/30 text-muted-foreground",
-    actionable && "cursor-pointer hover:brightness-125",
-    active && "ring-1 ring-accent/50 bg-accent/20"
-  )
-
-  if (actionable && onClick) {
-    return (
-      <button type="button" onClick={onClick} className={className}>
-        {label}
-      </button>
-    )
-  }
-
-  return <span className={className}>{label}</span>
-}
-
-function RecommendationPanel({
-  bundle,
-  onSelectFood,
-  onRefresh,
-}: {
-  bundle: NonNullable<ReturnType<typeof getFoodRecommendationsForJudgment>>
-  onSelectFood?: (food: FoodDatabaseItem) => void
-  onRefresh?: () => void
-}) {
-  const categories = useMemo(
-    () => new Set(bundle.items.map(({ food }) => food.category)).size,
-    [bundle.items]
-  )
-
-  return (
-    <div className="rounded-xl border border-accent/25 bg-background/50 px-3 py-2.5 space-y-2 overflow-hidden">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="text-[12px] font-semibold text-accent">{bundle.title}</p>
-          <p className="text-[10px] text-muted-foreground mt-0.5">{bundle.subtitle}</p>
-          <p className="text-[10px] text-muted-foreground/80 mt-1 tabular-nums">
-            {bundle.items.length}종 · 카테고리 {categories}개
-          </p>
-        </div>
-        {onRefresh ? (
-          <button
-            type="button"
-            onClick={onRefresh}
-            className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-border/60 bg-secondary/30 px-2 py-1.5 text-[10px] font-medium text-muted-foreground hover:border-accent/30 hover:text-accent transition-colors"
-            aria-label="다른 음식으로 다시 추천"
-          >
-            <RefreshCw className="size-3" />
-            새로고침
-          </button>
-        ) : null}
-      </div>
-      <div className="overflow-hidden rounded-lg border border-border/40 bg-background/20">
-        <div
-          className="max-h-[min(240px,42dvh)] overflow-y-auto overscroll-y-contain touch-pan-y pr-1 [scrollbar-gutter:stable] [-webkit-overflow-scrolling:touch]"
-          aria-label="추천 음식 목록"
-        >
-          <ul className="space-y-1.5 p-1.5">
-            {bundle.items.map(({ food, hint }) => (
-              <li key={food.id}>
-                <button
-                  type="button"
-                  onClick={() => onSelectFood?.(food)}
-                  className="w-full rounded-lg border border-border/50 bg-secondary/20 px-2.5 py-2 text-left hover:border-accent/30 hover:bg-accent/5 transition-colors"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[12px] font-medium">{food.name}</p>
-                    <span className="shrink-0 rounded-full border border-accent/25 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
-                      {food.category}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-muted-foreground tabular-nums mt-0.5">
-                    {hint}
-                  </p>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-        {bundle.items.length > 4 ? (
-          <p className="border-t border-border/30 px-2 py-1 text-center text-[9px] text-muted-foreground/70">
-            휠 또는 드래그로 더 보기
-          </p>
-        ) : null}
-      </div>
+      {slotId && (onClearOrUndo || onConfirmMealSlot || onUnlockMealSlot) ? (
+        <MealSlotConfirmButtons
+          hasItems={nutrition.count > 0}
+          undoAvailable={undoAvailable}
+          isConfirmed={mealConfirmed}
+          compact
+          onClearOrUndo={onClearOrUndo ?? (() => {})}
+          onConfirm={() => {
+            if (!slotId || !onConfirmMealSlot) return
+            onConfirmMealSlot(slotId, label)
+          }}
+          onUnlock={() => {
+            if (!slotId || !onUnlockMealSlot) return
+            onUnlockMealSlot(slotId, label)
+          }}
+        />
+      ) : null}
     </div>
   )
 }
@@ -725,6 +725,9 @@ export function NutritionDailySummary({
   clearAllUndoAvailable = false,
   onClearOrUndoMealSlot,
   mealSlotUndoAvailable,
+  onApplyRecommendedItem,
+  onConfirmMealSlot,
+  onUnlockMealSlot,
 }: {
   entries: LoggedFoodEntry[]
   targets: MacroTargets
@@ -738,10 +741,14 @@ export function NutritionDailySummary({
   clearAllUndoAvailable?: boolean
   onClearOrUndoMealSlot?: (slotId: FoodMealSlotId, label: string) => void
   mealSlotUndoAvailable?: Partial<Record<FoodMealSlotId, boolean>>
+  onApplyRecommendedItem?: (
+    item: RecommendFoodCombo["items"][number],
+    combo: RecommendFoodCombo,
+    slotId: FoodMealSlotId
+  ) => void
+  onConfirmMealSlot?: (slotId: FoodMealSlotId, label: string) => void
+  onUnlockMealSlot?: (slotId: FoodMealSlotId, label: string) => void
 }) {
-  const [activeKind, setActiveKind] = useState<DietJudgmentKind | null>(null)
-  const [recommendationExcludeIds, setRecommendationExcludeIds] = useState<string[]>([])
-  const [recommendationRotateOffset, setRecommendationRotateOffset] = useState(0)
   const totals = useMemo(() => sumLoggedNutrition(entries), [entries])
 
   const mealNutrition = useMemo(() => groupNutritionByMeal(entries), [entries])
@@ -764,41 +771,6 @@ export function NutritionDailySummary({
     [targets.breakdown.coachingMode]
   )
 
-  const judgmentTags = useMemo(
-    () => buildDietJudgmentSummary(totals, targets),
-    [totals, targets]
-  )
-
-  const warningContext = useMemo(
-    () => buildDietWarningContext(judgmentTags),
-    [judgmentTags]
-  )
-
-  const recommendationBundle = useMemo(
-    () =>
-      activeKind
-        ? getFoodRecommendationsForJudgment(activeKind, warningContext, {
-            excludeIds: recommendationExcludeIds,
-            rotateOffset: recommendationRotateOffset,
-          })
-        : null,
-    [activeKind, warningContext, recommendationExcludeIds, recommendationRotateOffset]
-  )
-
-  useEffect(() => {
-    setRecommendationExcludeIds([])
-    setRecommendationRotateOffset(0)
-  }, [activeKind])
-
-  const handleRefreshRecommendations = () => {
-    if (!recommendationBundle?.items.length) return
-    setRecommendationExcludeIds((prev) => [
-      ...prev,
-      ...recommendationBundle.items.map(({ food }) => food.id),
-    ])
-    setRecommendationRotateOffset((prev) => prev + recommendationBundle.items.length)
-  }
-
   useEffect(() => {
     if (totals.count === 0) return
     validateMacroCalories(totals, "오늘 식단 합계")
@@ -809,57 +781,25 @@ export function NutritionDailySummary({
 
   if (totals.count === 0 && !clearAllUndoAvailable) return null
 
-  const evaluationSummary = judgmentTags
-    .slice(0, 3)
-    .map((tag) => tag.label)
-    .join(" · ")
-
   const mealSummary = `${totals.count}개 기록 · ${FOOD_MEAL_SLOTS.length}끼`
 
   return (
     <div className="space-y-2 mb-3">
       <CollapsibleInlineSection
         title="식단 질 평가"
-        summary={evaluationSummary || `${totals.count}개 기록`}
+        summary={`${totals.count}개 기록 · 영양 분석`}
         sectionId="nutrition-diet-evaluation"
       >
-        <div className="rounded-xl border border-accent/25 bg-accent/5 px-3 py-2.5">
-          <p className="text-[10px] text-muted-foreground mb-2">
-            태그를 눌러 부족한 영양소 보완 음식을 추천받을 수 있어요.
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {judgmentTags.map((tag) => (
-              <JudgmentChip
-                key={tag.label}
-                label={tag.label}
-                tone={tag.tone}
-                actionable={tag.actionable}
-                active={activeKind === tag.kind}
-                onClick={
-                  tag.actionable
-                    ? () =>
-                        setActiveKind((prev) =>
-                          prev === tag.kind ? null : tag.kind
-                        )
-                    : undefined
-                }
-              />
-            ))}
-          </div>
-          {recommendationBundle ? (
-            <div className="mt-3">
-              <RecommendationPanel
-                bundle={recommendationBundle}
-                onSelectFood={onSelectFood}
-                onRefresh={handleRefreshRecommendations}
-              />
-            </div>
-          ) : null}
-        </div>
+        <NutritionQualityPanel
+          totals={totals}
+          targets={targets}
+          entries={entries}
+          onApplyRecommendedItem={onApplyRecommendedItem}
+        />
       </CollapsibleInlineSection>
 
       <CollapsibleInlineSection
-        title="끼니별 보기"
+        title="아침 점심 저녁 나눠보기"
         summary={mealSummary}
         sectionId="nutrition-meal-breakdown"
       >
@@ -889,6 +829,8 @@ export function NutritionDailySummary({
                       onClearOrUndoMealSlot(slot.id as FoodMealSlotId, slot.label)
                   : undefined
               }
+              onConfirmMealSlot={onConfirmMealSlot}
+              onUnlockMealSlot={onUnlockMealSlot}
             />
           ))}
           {mealNutrition.unassigned.count > 0 ? (

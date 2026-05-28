@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useImperativeHandle, useMemo, useState, forwardRef } from "react"
-import { Bookmark, ChevronDown, FolderOpen, Plus, RefreshCw, Sparkles, Trash2, Undo2, UtensilsCrossed } from "lucide-react"
+import { ChevronDown, Plus, RefreshCw, Sparkles, Trash2, Undo2, UtensilsCrossed, Bookmark } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
@@ -96,14 +96,31 @@ import type { NutritionStrategySettings } from "@/lib/food-recommendation-strate
 import { mealTimingToContext } from "@/lib/food-recommendation-strategy"
 import { hasTrainingToday, trainingStatusToIntensity } from "@/lib/food-recommendation-strategy"
 import {
+  DAILY_FOOD_LOG_EVENT,
   loadTodayFoodLog,
   replaceMealSlotFoodLogEntries,
   mealToFoodLogEntries,
 } from "@/lib/daily-food-log"
+import {
+  confirmMealSlot,
+  isMealSlotConfirmed,
+  unconfirmMealSlot,
+  CONFIRMED_MEAL_SLOTS_EVENT,
+} from "@/lib/confirmed-meal-slots"
+import { MealSlotConfirmButtons } from "@/components/meal-slot-confirm-buttons"
 import { formatMacroG, nutritionPercent, sumLoggedNutrition } from "@/lib/food-nutrition-utils"
-import { NutritionRecommendationPanel } from "@/components/recommended-food-combos-view"
+import {
+  NutritionRecommendationPanel,
+  RECOMMENDATION_LIST_SCROLL_CLASS,
+} from "@/components/recommended-food-combos-view"
 import { saveExternalFoodFromSearchResult } from "@/lib/external-food-store"
 import { CollapsibleFoldPanel, CollapsibleInlineSection } from "@/components/collapsible-card"
+import {
+  formatSavedItemsSummary,
+  MealSlotSaveLoadBar,
+  SaveMealMenuDialog,
+  SavedMealMenuPicker,
+} from "@/components/meal-slot-save-load-bar"
 import { MacroRangeLabel } from "@/components/macro-range-label"
 import {
   CollapsibleGroupToolbar,
@@ -120,192 +137,46 @@ function inferDefaultMealSlot(): FoodMealSlotId {
   return "snack"
 }
 
-function formatSavedItemsSummary(items: SavedMealMenuItem[]): string {
-  if (items.length === 0) return "항목 없음"
-  const names = items
-    .slice(0, 2)
-    .map((item) => getFoodById(item.foodId)?.name ?? item.foodId)
-  return `${items.length}개 · ${names.join(", ")}${items.length > 2 ? "…" : ""}`
-}
+type MenuDescriptionMode = "brief" | "detailed"
 
-function SaveMealMenuDialog({
-  open,
-  onOpenChange,
-  title,
-  defaultName,
-  onConfirm,
+function MealCoachingHint({
+  text,
+  mode,
 }: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  title: string
-  defaultName: string
-  onConfirm: (name: string) => void
+  text: string
+  mode: MenuDescriptionMode
 }) {
-  const [name, setName] = useState(defaultName)
-
-  useEffect(() => {
-    if (open) setName(defaultName)
-  }, [open, defaultName])
-
+  if (!text) return null
+  if (mode === "brief") {
+    return (
+      <span className="inline-block rounded border border-border/40 bg-secondary/20 px-1.5 py-0.5 text-[9px] text-muted-foreground">
+        {text}
+      </span>
+    )
+  }
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xs gap-3">
-        <DialogHeader>
-          <DialogTitle className="text-sm">{title}</DialogTitle>
-        </DialogHeader>
-        <Input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="저장 이름"
-          className="h-9 text-sm"
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              onConfirm(name.trim() || defaultName)
-              onOpenChange(false)
-            }
-          }}
-        />
-        <div className="flex justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => onOpenChange(false)}
-          >
-            취소
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => {
-              onConfirm(name.trim() || defaultName)
-              onOpenChange(false)
-            }}
-          >
-            저장
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <p className="text-[10px] leading-relaxed text-muted-foreground">{text}</p>
   )
 }
 
-function SavedMealMenuPicker<T extends { id: string; name: string }>({
-  items,
-  emptyLabel,
-  triggerLabel,
-  getSummary,
-  onLoad,
-  onDelete,
+function MenuDescriptionModeToggle({
+  mode,
+  onToggle,
 }: {
-  items: T[]
-  emptyLabel: string
-  triggerLabel: string
-  getSummary: (item: T) => string
-  onLoad: (item: T) => void
-  onDelete: (id: string) => void
+  mode: MenuDescriptionMode
+  onToggle: () => void
 }) {
-  const [open, setOpen] = useState(false)
-
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-7 px-2 text-[10px] border-border/60"
-        >
-          <FolderOpen className="h-3 w-3 mr-1" />
-          {triggerLabel}
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-72 p-2">
-        {items.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground px-2 py-3 text-center">
-            {emptyLabel}
-          </p>
-        ) : (
-          <ul className="max-h-56 overflow-y-auto space-y-1">
-            {items.map((item) => (
-              <li
-                key={item.id}
-                className="flex items-start gap-1 rounded-md hover:bg-secondary/60 p-1.5"
-              >
-                <button
-                  type="button"
-                  className="flex-1 min-w-0 text-left"
-                  onClick={() => {
-                    onLoad(item)
-                    setOpen(false)
-                  }}
-                >
-                  <p className="text-[11px] font-medium truncate">{item.name}</p>
-                  <p className="text-[10px] text-muted-foreground truncate">
-                    {getSummary(item)}
-                  </p>
-                </button>
-                <button
-                  type="button"
-                  className="h-6 w-6 shrink-0 flex items-center justify-center rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
-                  aria-label="삭제"
-                  onClick={() => onDelete(item.id)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-function MealSlotSaveLoadBar({
-  meal,
-  savedSlots,
-  onSave,
-  onLoadSlot,
-  onDeleteSlot,
-}: {
-  meal: DailyMealMenuPlan["meals"][number]
-  savedSlots: SavedMealSlotRecord[]
-  onSave: (name: string) => void
-  onLoadSlot: (record: SavedMealSlotRecord) => void
-  onDeleteSlot: (id: string) => void
-}) {
-  const [saveOpen, setSaveOpen] = useState(false)
-  const defaultName = `${MEAL_SLOT_LABELS[meal.slotId]} ${new Date().toLocaleDateString("ko-KR")}`
-
-  return (
-    <div className="flex items-center gap-1.5 pt-1.5 mt-1.5 border-t border-border/30">
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="h-7 px-2 text-[10px] text-muted-foreground hover:text-foreground"
-        onClick={() => setSaveOpen(true)}
-      >
-        <Bookmark className="h-3 w-3 mr-1" />
-        저장
-      </Button>
-      <SavedMealMenuPicker
-        items={savedSlots}
-        emptyLabel={`저장된 ${meal.label} 메뉴가 없어요`}
-        triggerLabel="불러오기"
-        getSummary={(item) => formatSavedItemsSummary(item.items)}
-        onLoad={onLoadSlot}
-        onDelete={onDeleteSlot}
-      />
-      <SaveMealMenuDialog
-        open={saveOpen}
-        onOpenChange={setSaveOpen}
-        title={`${meal.label} 메뉴 저장`}
-        defaultName={defaultName}
-        onConfirm={onSave}
-      />
-    </div>
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-8 px-2.5 text-[11px] border-accent/30 text-accent hover:bg-accent/10 shrink-0"
+      onClick={onToggle}
+      aria-label={mode === "brief" ? "설명 상세히 보기" : "설명 간략히 보기"}
+    >
+      {mode === "brief" ? "설명 상세히" : "설명 간략히"}
+    </Button>
   )
 }
 
@@ -940,60 +811,27 @@ function buildMealSlotUndoSnapshot(
 function MealSlotActionButtons({
   meal,
   undoAvailable = false,
+  isConfirmed = false,
   onClearOrUndo,
   onApply,
+  onUnlock,
 }: {
   meal: DailyMealMenuPlan["meals"][number]
   undoAvailable?: boolean
+  isConfirmed?: boolean
   onClearOrUndo: (meal: DailyMealMenuPlan["meals"][number]) => void
   onApply: (meal: DailyMealMenuPlan["meals"][number]) => void
+  onUnlock: (meal: DailyMealMenuPlan["meals"][number]) => void
 }) {
-  const hasItems = meal.items.length > 0
-
   return (
-    <div className="flex gap-2">
-      <button
-        type="button"
-        disabled={!undoAvailable && !hasItems}
-        onClick={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          onClearOrUndo(meal)
-        }}
-        className={cn(
-          "flex-1 h-9 rounded-lg text-[11px] font-semibold transition-colors inline-flex items-center justify-center gap-1",
-          undoAvailable
-            ? "border border-accent/35 bg-accent/10 text-accent hover:bg-accent/20"
-            : "border border-border/60 bg-background/30 text-muted-foreground hover:text-destructive hover:border-destructive/40 hover:bg-destructive/5",
-          "disabled:opacity-40 disabled:pointer-events-none"
-        )}
-      >
-        {undoAvailable ? (
-          <>
-            <Undo2 className="h-3.5 w-3.5" />
-            되돌리기
-          </>
-        ) : (
-          "메뉴 비우기"
-        )}
-      </button>
-      <button
-        type="button"
-        disabled={!hasItems}
-        onClick={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          onApply(meal)
-        }}
-        className={cn(
-          "flex-1 h-9 rounded-lg text-[11px] font-semibold transition-colors",
-          "border border-accent/35 bg-accent/10 text-accent",
-          "hover:bg-accent/20 disabled:opacity-40 disabled:pointer-events-none"
-        )}
-      >
-        영양관리에 반영
-      </button>
-    </div>
+    <MealSlotConfirmButtons
+      hasItems={meal.items.length > 0}
+      undoAvailable={undoAvailable}
+      isConfirmed={isConfirmed}
+      onClearOrUndo={() => onClearOrUndo(meal)}
+      onConfirm={() => onApply(meal)}
+      onUnlock={() => onUnlock(meal)}
+    />
   )
 }
 
@@ -1001,20 +839,26 @@ function AllMealsActionButtons({
   undoAvailable = false,
   canClear,
   canApply,
+  allConfirmed = false,
+  anyConfirmed = false,
   onClearOrUndo,
   onApplyAll,
+  onUnlockAll,
 }: {
   undoAvailable?: boolean
   canClear: boolean
   canApply: boolean
+  allConfirmed?: boolean
+  anyConfirmed?: boolean
   onClearOrUndo: () => void
   onApplyAll: () => void
+  onUnlockAll: () => void
 }) {
   return (
     <div className="flex gap-2">
       <button
         type="button"
-        disabled={!undoAvailable && !canClear}
+        disabled={anyConfirmed || (!undoAvailable && !canClear)}
         onClick={onClearOrUndo}
         className={cn(
           "flex-1 h-9 rounded-lg text-[11px] font-semibold transition-colors inline-flex items-center justify-center gap-1",
@@ -1036,14 +880,16 @@ function AllMealsActionButtons({
       <button
         type="button"
         disabled={!canApply}
-        onClick={onApplyAll}
+        onClick={() => (allConfirmed ? onUnlockAll() : onApplyAll())}
         className={cn(
           "flex-1 h-9 rounded-lg text-[11px] font-semibold transition-colors",
-          "border border-accent/35 bg-accent/10 text-accent",
-          "hover:bg-accent/20 disabled:opacity-40 disabled:pointer-events-none"
+          allConfirmed
+            ? "border border-amber-500/35 bg-amber-500/10 text-amber-400 hover:bg-amber-500/15"
+            : "border border-accent/35 bg-accent/10 text-accent hover:bg-accent/20",
+          "disabled:opacity-40 disabled:pointer-events-none"
         )}
       >
-        영양 관리에 모두 반영
+        {allConfirmed ? "전체 수정" : "모두 결정"}
       </button>
     </div>
   )
@@ -1090,8 +936,11 @@ function MealMenuCompositionCard({
   onLoadSlot,
   onDeleteSavedSlot,
   onApplyToNutrition,
+  onUnlockFromNutrition,
   onClearOrUndo,
   undoAvailable = false,
+  isConfirmed = false,
+  descriptionMode = "brief",
   defaultOpen = false,
 }: {
   meal: DailyMealMenuPlan["meals"][number]
@@ -1121,20 +970,32 @@ function MealMenuCompositionCard({
   onLoadSlot: (record: SavedMealSlotRecord) => void
   onDeleteSavedSlot: (id: string) => void
   onApplyToNutrition: (meal: DailyMealMenuPlan["meals"][number]) => void
+  onUnlockFromNutrition: (meal: DailyMealMenuPlan["meals"][number]) => void
   onClearOrUndo: (meal: DailyMealMenuPlan["meals"][number]) => void
   undoAvailable?: boolean
+  isConfirmed?: boolean
+  descriptionMode?: MenuDescriptionMode
   defaultOpen?: boolean
 }) {
   const itemSummary = meal.items.map((item) => item.name).join(" · ")
+  const locked = isConfirmed
+  const coachingText =
+    descriptionMode === "brief"
+      ? meal.coachingNoteBrief
+      : meal.coachingNote
+  const expandedByDefault = descriptionMode === "detailed"
 
   return (
-    <div className="rounded-xl border border-border/50 bg-secondary/15 overflow-hidden">
+    <div className={cn(
+      "rounded-xl border overflow-hidden",
+      locked ? "border-accent/30 bg-accent/5" : "border-border/50 bg-secondary/15"
+    )}>
     <CollapsibleFoldPanel
-      defaultOpen={defaultOpen}
+      defaultOpen={defaultOpen ?? expandedByDefault}
       sectionId={`recommended-meal-${meal.slotId}-composition`}
       className="border-0 rounded-none bg-transparent"
       toolbar={
-        canRefreshSlot && onRefreshSlot ? (
+        canRefreshSlot && onRefreshSlot && !locked ? (
           <MealSlotRefreshButton
             mealLabel={meal.label}
             onRefresh={() => onRefreshSlot(meal.slotId)}
@@ -1143,14 +1004,27 @@ function MealMenuCompositionCard({
       }
       header={
         <>
-          <p className="text-[11px] font-semibold text-accent leading-snug">{meal.label}</p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-[11px] font-semibold text-accent leading-snug">{meal.label}</p>
+            {locked ? (
+              <span className="inline-flex items-center gap-0.5 rounded-full border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
+                결정됨
+              </span>
+            ) : null}
+          </div>
           <p className="text-[12px] font-medium mt-0.5 leading-snug">{meal.title}</p>
         </>
       }
       summary={
-        <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
-          {meal.items.length}개 · {itemSummary}
-        </p>
+        descriptionMode === "brief" ? (
+          <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
+            {formatCalories(meal.nutrition.calories)}kcal · {coachingText}
+          </p>
+        ) : (
+          <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
+            {meal.items.length}개 · {itemSummary}
+          </p>
+        )
       }
     >
       <ul className="space-y-1">
@@ -1161,14 +1035,14 @@ function MealMenuCompositionCard({
             itemIndex={itemIndex}
             slotId={meal.slotId}
             mealLabel={meal.label}
-            canRefresh={canRefreshItem?.(meal.slotId, itemIndex)}
+            canRefresh={!locked && canRefreshItem?.(meal.slotId, itemIndex)}
             onRefresh={
-              onRefreshItem
+              !locked && onRefreshItem
                 ? () => onRefreshItem(meal.slotId, itemIndex)
                 : undefined
             }
             onReplace={
-              onReplaceItem
+              !locked && onReplaceItem
                 ? (food) =>
                     onReplaceItem(
                       meal.slotId,
@@ -1179,41 +1053,46 @@ function MealMenuCompositionCard({
                 : undefined
             }
             onDelete={
-              onDeleteItem
+              !locked && onDeleteItem
                 ? () =>
                     onDeleteItem(meal.slotId, itemIndex, item.addOverrideKey)
                 : undefined
             }
-            onSelectFood={onSelectFood}
+            onSelectFood={!locked ? onSelectFood : undefined}
           />
         ))}
       </ul>
 
-      {onAddItem ? (
+      {!locked && onAddItem ? (
         <RecommendedMenuAddItemButton
           mealLabel={meal.label}
           onAdd={(food) => onAddItem(meal.slotId, food)}
         />
       ) : null}
 
-      <p className="text-[10px] leading-relaxed text-muted-foreground">
-        {meal.coachingNote}
-      </p>
-
-      <MealSlotSaveLoadBar
-        meal={meal}
-        savedSlots={savedSlots}
-        onSave={(name) => onSaveSlot(meal, name)}
-        onLoadSlot={onLoadSlot}
-        onDeleteSlot={onDeleteSavedSlot}
-      />
+      {descriptionMode === "detailed" ? (
+        <MealCoachingHint text={coachingText} mode={descriptionMode} />
+      ) : null}
     </CollapsibleFoldPanel>
-    <div className="px-3 pb-2.5 pt-1 border-t border-border/30">
+    <div className="px-3 pb-2.5 pt-1 border-t border-border/30 space-y-2">
+      {!locked ? (
+        <MealSlotSaveLoadBar
+          slotId={meal.slotId}
+          mealLabel={meal.label}
+          savedSlots={savedSlots}
+          saveDisabled={meal.items.length === 0}
+          onSave={(name) => onSaveSlot(meal, name)}
+          onLoadSlot={onLoadSlot}
+          onDeleteSlot={onDeleteSavedSlot}
+        />
+      ) : null}
       <MealSlotActionButtons
         meal={meal}
         undoAvailable={undoAvailable}
+        isConfirmed={isConfirmed}
         onClearOrUndo={onClearOrUndo}
         onApply={onApplyToNutrition}
+        onUnlock={onUnlockFromNutrition}
       />
     </div>
     </div>
@@ -1236,9 +1115,12 @@ function MealMenuCard({
   onLoadSlot,
   onDeleteSavedSlot,
   onApplyToNutrition,
+  onUnlockFromNutrition,
   onClearOrUndo,
   undoAvailable = false,
-  defaultOpen = true,
+  isConfirmed = false,
+  descriptionMode = "brief",
+  defaultOpen,
 }: {
   meal: DailyMealMenuPlan["meals"][number]
   loadRevision?: number
@@ -1267,21 +1149,33 @@ function MealMenuCard({
   onLoadSlot: (record: SavedMealSlotRecord) => void
   onDeleteSavedSlot: (id: string) => void
   onApplyToNutrition: (meal: DailyMealMenuPlan["meals"][number]) => void
+  onUnlockFromNutrition: (meal: DailyMealMenuPlan["meals"][number]) => void
   onClearOrUndo: (meal: DailyMealMenuPlan["meals"][number]) => void
   undoAvailable?: boolean
+  isConfirmed?: boolean
+  descriptionMode?: MenuDescriptionMode
   defaultOpen?: boolean
 }) {
   const t = meal.slotTargets
   const n = meal.nutrition
+  const locked = isConfirmed
+  const coachingText =
+    descriptionMode === "brief"
+      ? meal.coachingNoteBrief
+      : meal.coachingNote
+  const expandedByDefault = descriptionMode === "detailed"
 
   return (
-    <div className="rounded-xl border border-border/50 bg-secondary/15 overflow-hidden">
+    <div className={cn(
+      "rounded-xl border overflow-hidden",
+      locked ? "border-accent/30 bg-accent/5" : "border-border/50 bg-secondary/15"
+    )}>
     <CollapsibleFoldPanel
-      defaultOpen={defaultOpen}
+      defaultOpen={defaultOpen ?? expandedByDefault}
       sectionId={`recommended-meal-${meal.slotId}-detail`}
       className="border-0 rounded-none bg-transparent"
       toolbar={
-        canRefreshSlot && onRefreshSlot ? (
+        canRefreshSlot && onRefreshSlot && !locked ? (
           <MealSlotRefreshButton
             mealLabel={meal.label}
             onRefresh={() => onRefreshSlot(meal.slotId)}
@@ -1290,16 +1184,30 @@ function MealMenuCard({
       }
       header={
         <>
-          <p className="text-[11px] font-semibold text-accent leading-snug">{meal.label}</p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-[11px] font-semibold text-accent leading-snug">{meal.label}</p>
+            {locked ? (
+              <span className="inline-flex items-center gap-0.5 rounded-full border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
+                결정됨
+              </span>
+            ) : null}
+          </div>
           <p className="text-[12px] font-medium mt-0.5 leading-snug">{meal.title}</p>
         </>
       }
       summary={
-        <p className="text-[10px] text-muted-foreground tabular-nums mt-0.5">
-          {formatCalories(n.calories)}kcal · {meal.items.length}개 음식
-        </p>
+        descriptionMode === "brief" ? (
+          <p className="text-[10px] text-muted-foreground tabular-nums mt-0.5 truncate">
+            {formatCalories(n.calories)}kcal · {coachingText}
+          </p>
+        ) : (
+          <p className="text-[10px] text-muted-foreground tabular-nums mt-0.5">
+            {formatCalories(n.calories)}kcal · {meal.items.length}개 음식
+          </p>
+        )
       }
     >
+      {descriptionMode === "detailed" ? (
       <div className="space-y-1.5 rounded-lg border border-border/40 bg-background/30 px-2 py-2">
         <MacroMiniRow
           label="칼로리"
@@ -1333,6 +1241,7 @@ function MealMenuCard({
           unit="g"
         />
       </div>
+      ) : null}
 
       <ul className="space-y-1">
         {meal.items.map((item, itemIndex) => (
@@ -1342,14 +1251,14 @@ function MealMenuCard({
             itemIndex={itemIndex}
             slotId={meal.slotId}
             mealLabel={meal.label}
-            canRefresh={canRefreshItem?.(meal.slotId, itemIndex)}
+            canRefresh={!locked && canRefreshItem?.(meal.slotId, itemIndex)}
             onRefresh={
-              onRefreshItem
+              !locked && onRefreshItem
                 ? () => onRefreshItem(meal.slotId, itemIndex)
                 : undefined
             }
             onReplace={
-              onReplaceItem
+              !locked && onReplaceItem
                 ? (food) =>
                     onReplaceItem(
                       meal.slotId,
@@ -1360,41 +1269,46 @@ function MealMenuCard({
                 : undefined
             }
             onDelete={
-              onDeleteItem
+              !locked && onDeleteItem
                 ? () =>
                     onDeleteItem(meal.slotId, itemIndex, item.addOverrideKey)
                 : undefined
             }
-            onSelectFood={onSelectFood}
+            onSelectFood={!locked ? onSelectFood : undefined}
           />
         ))}
       </ul>
 
-      {onAddItem ? (
+      {!locked && onAddItem ? (
         <RecommendedMenuAddItemButton
           mealLabel={meal.label}
           onAdd={(food) => onAddItem(meal.slotId, food)}
         />
       ) : null}
 
-      <p className="text-[10px] leading-relaxed text-muted-foreground">
-        {meal.coachingNote}
-      </p>
-
-      <MealSlotSaveLoadBar
-        meal={meal}
-        savedSlots={savedSlots}
-        onSave={(name) => onSaveSlot(meal, name)}
-        onLoadSlot={onLoadSlot}
-        onDeleteSlot={onDeleteSavedSlot}
-      />
+      {descriptionMode === "detailed" ? (
+        <MealCoachingHint text={coachingText} mode={descriptionMode} />
+      ) : null}
     </CollapsibleFoldPanel>
-    <div className="px-3 pb-2.5 pt-1 border-t border-border/30">
+    <div className="px-3 pb-2.5 pt-1 border-t border-border/30 space-y-2">
+      {!locked ? (
+        <MealSlotSaveLoadBar
+          slotId={meal.slotId}
+          mealLabel={meal.label}
+          savedSlots={savedSlots}
+          saveDisabled={meal.items.length === 0}
+          onSave={(name) => onSaveSlot(meal, name)}
+          onLoadSlot={onLoadSlot}
+          onDeleteSlot={onDeleteSavedSlot}
+        />
+      ) : null}
       <MealSlotActionButtons
         meal={meal}
         undoAvailable={undoAvailable}
+        isConfirmed={isConfirmed}
         onClearOrUndo={onClearOrUndo}
         onApply={onApplyToNutrition}
+        onUnlock={onUnlockFromNutrition}
       />
     </div>
     </div>
@@ -1534,7 +1448,10 @@ export const RecommendedMealMenuPanel = forwardRef<
     Partial<Record<FoodMealSlotId, number>>
   >({})
   const [dailySaveOpen, setDailySaveOpen] = useState(false)
+  const [confirmedVersion, setConfirmedVersion] = useState(0)
   const [scope, setScope] = useState<"daily" | "perMeal">("daily")
+  const [descriptionMode, setDescriptionMode] =
+    useState<MenuDescriptionMode>("brief")
   const [panelOpen, setPanelOpen] = useCollapsibleOpen("recommended-meal-menu", true)
   const profile = useMemo(
     () => (hydrated ? loadUserProfile() : { ...DEFAULT_USER_PROFILE }),
@@ -1562,6 +1479,17 @@ export const RecommendedMealMenuPanel = forwardRef<
   useEffect(() => {
     if (!hydrated) return
     setStrategySettings(loadStrategySettings())
+  }, [hydrated])
+
+  useEffect(() => {
+    if (!hydrated) return
+    const sync = () => setConfirmedVersion((version) => version + 1)
+    window.addEventListener(CONFIRMED_MEAL_SLOTS_EVENT, sync)
+    window.addEventListener(DAILY_FOOD_LOG_EVENT, sync)
+    return () => {
+      window.removeEventListener(CONFIRMED_MEAL_SLOTS_EVENT, sync)
+      window.removeEventListener(DAILY_FOOD_LOG_EVENT, sync)
+    }
   }, [hydrated])
 
   const handleStrategyChange = useCallback(
@@ -1625,7 +1553,7 @@ export const RecommendedMealMenuPanel = forwardRef<
         }
       } catch {
         setApiError(
-          "추천 데이터를 불러오는 중 문제가 발생했습니다.\n관리자에게 문의해주세요."
+          "추천 데이터를 불러오지 못했습니다. 잠시 후 다시 시도해주세요."
         )
       } finally {
         setApiLoading(false)
@@ -1884,6 +1812,10 @@ export const RecommendedMealMenuPanel = forwardRef<
     servings = 1,
     lockServings = false
   ) => {
+    if (isMealSlotConfirmed(slotId)) {
+      toast.message(`결정된 끼니는 수정할 수 없어요. 「수정」을 눌러주세요.`)
+      return
+    }
     invalidateMealEdits(slotId)
     if (addOverrideKey) {
       setItemSlotOverrides((prev) => ({
@@ -1951,6 +1883,10 @@ export const RecommendedMealMenuPanel = forwardRef<
   }
 
   const handleAddItem = (slotId: FoodMealSlotId, food: FoodDatabaseItem) => {
+    if (isMealSlotConfirmed(slotId)) {
+      toast.message(`결정된 끼니는 수정할 수 없어요. 「수정」을 눌러주세요.`)
+      return
+    }
     invalidateMealEdits(slotId)
     const meal = plan?.meals.find((entry) => entry.slotId === slotId)
     if (meal?.items.some((item) => item.foodId === food.id)) {
@@ -1978,6 +1914,10 @@ export const RecommendedMealMenuPanel = forwardRef<
     itemIndex: number,
     addOverrideKey?: string
   ) => {
+    if (isMealSlotConfirmed(slotId)) {
+      toast.message(`결정된 끼니는 수정할 수 없어요. 「수정」을 눌러주세요.`)
+      return
+    }
     invalidateMealEdits(slotId)
     if (addOverrideKey) {
       setItemSlotOverrides((prev) => {
@@ -2230,11 +2170,23 @@ export const RecommendedMealMenuPanel = forwardRef<
   const handleApplyMealToNutrition = useCallback(
     (meal: DailyMealMenuPlan["meals"][number]) => {
       if (meal.items.length === 0) return
+      if (isMealSlotConfirmed(meal.slotId)) return
+
       replaceMealSlotFoodLogEntries(
         meal.slotId,
         mealToFoodLogEntries(meal)
       )
-      toast.success(`「${meal.label}」 메뉴를 오늘의 영양관리에 반영했어요`)
+      confirmMealSlot(meal.slotId)
+      toast.success(`「${meal.label}」 식단을 결정했어요`)
+    },
+    []
+  )
+
+  const handleUnlockMealFromNutrition = useCallback(
+    (meal: DailyMealMenuPlan["meals"][number]) => {
+      if (!isMealSlotConfirmed(meal.slotId)) return
+      unconfirmMealSlot(meal.slotId)
+      toast.message(`「${meal.label}」 수정 모드 — 영양관리 표 반영을 해제했어요`)
     },
     []
   )
@@ -2245,14 +2197,27 @@ export const RecommendedMealMenuPanel = forwardRef<
     if (mealsWithItems.length === 0) return
 
     for (const meal of mealsWithItems) {
+      if (isMealSlotConfirmed(meal.slotId)) continue
       replaceMealSlotFoodLogEntries(
         meal.slotId,
         mealToFoodLogEntries(meal)
       )
+      confirmMealSlot(meal.slotId)
     }
-    toast.success(
-      `추천 메뉴 ${mealsWithItems.length}끼를 오늘의 영양관리에 반영했어요`
+    toast.success(`추천 메뉴 ${mealsWithItems.length}끼를 결정했어요`)
+  }, [plan])
+
+  const handleUnlockAllMealsFromNutrition = useCallback(() => {
+    if (!plan) return
+    const confirmedMeals = plan.meals.filter(
+      (meal) => meal.items.length > 0 && isMealSlotConfirmed(meal.slotId)
     )
+    if (confirmedMeals.length === 0) return
+
+    for (const meal of confirmedMeals) {
+      unconfirmMealSlot(meal.slotId)
+    }
+    toast.message(`추천 메뉴 ${confirmedMeals.length}끼 수정 모드 — 영양관리 반영 해제`)
   }, [plan])
 
   const handleClearOrUndoAllMealCompositions = useCallback(() => {
@@ -2266,6 +2231,15 @@ export const RecommendedMealMenuPanel = forwardRef<
       setAllMealsUndoSnapshot(null)
       setSlotUndoSnapshots({})
       toast.message("추천 메뉴를 모두 되돌렸습니다")
+      return
+    }
+
+    if (
+      plan?.meals.some(
+        (meal) => meal.items.length > 0 && isMealSlotConfirmed(meal.slotId)
+      )
+    ) {
+      toast.message("결정된 끼니가 있어요. 「전체 수정」을 눌러주세요.")
       return
     }
 
@@ -2328,6 +2302,12 @@ export const RecommendedMealMenuPanel = forwardRef<
   const handleClearOrUndoMealComposition = useCallback(
     (meal: DailyMealMenuPlan["meals"][number]) => {
       const slotId = meal.slotId
+
+      if (isMealSlotConfirmed(slotId)) {
+        toast.message(`「${meal.label}」는 결정된 상태예요. 수정하려면 「수정」을 눌러주세요.`)
+        return
+      }
+
       const undo = slotUndoSnapshots[slotId]
 
       if (undo) {
@@ -2428,11 +2408,17 @@ export const RecommendedMealMenuPanel = forwardRef<
         onRefresh={handleRefreshSmartRecommendations}
         onSelectItem={onSelectFood ? handleSelectRecommendItem : undefined}
         onApplyCombo={onApplyCombo}
+        descriptionMode={descriptionMode}
+        onDescriptionModeToggle={() =>
+          setDescriptionMode((mode) => (mode === "brief" ? "detailed" : "brief"))
+        }
       />
     )
   }
 
   if (!plan) return null
+
+  void confirmedVersion
 
   const dailyKcalSummary = `${formatCalories(plan.dailyNutrition.calories)}kcal · ${plan.meals.length}끼`
 
@@ -2464,8 +2450,17 @@ export const RecommendedMealMenuPanel = forwardRef<
                   </p>
                 ) : (
                   <>
-                    <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
-                      {plan.subtitle}
+                    <p
+                      className={cn(
+                        "text-muted-foreground mt-1 leading-relaxed",
+                        descriptionMode === "brief"
+                          ? "text-[10px]"
+                          : "text-[11px]"
+                      )}
+                    >
+                      {descriptionMode === "brief"
+                        ? plan.subtitleBrief
+                        : plan.subtitle}
                     </p>
                     <TrainingReflectToggle
                       schedule={actualSchedule}
@@ -2531,6 +2526,14 @@ export const RecommendedMealMenuPanel = forwardRef<
                     onLoad={handleLoadDaily}
                     onDelete={handleDeleteSavedDaily}
                   />
+                  <MenuDescriptionModeToggle
+                    mode={descriptionMode}
+                    onToggle={() =>
+                      setDescriptionMode((mode) =>
+                        mode === "brief" ? "detailed" : "brief"
+                      )
+                    }
+                  />
                   <Button
                     type="button"
                     variant="outline"
@@ -2539,7 +2542,7 @@ export const RecommendedMealMenuPanel = forwardRef<
                     onClick={handleRefresh}
                   >
                     <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                    다른 메뉴로
+                    다른 조합
                   </Button>
                 </div>
               </div>
@@ -2573,9 +2576,16 @@ export const RecommendedMealMenuPanel = forwardRef<
                   >
                     <CollapsibleSectionProvider>
                       <CollapsibleGroupToolbar className="mb-1.5" />
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        {plan.meals.map((meal) => (
-                          <MealMenuCompositionCard
+                      <div
+                        className={cn(
+                          RECOMMENDATION_LIST_SCROLL_CLASS,
+                          "rounded-xl border border-border/40 bg-black/10 px-1 py-1"
+                        )}
+                        aria-label="추천 메뉴 구성 목록"
+                      >
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {plan.meals.map((meal) => (
+                            <MealMenuCompositionCard
                             key={`${meal.slotId}-${menuLoadRevision}-${plan.variantIndex}-list`}
                             meal={meal}
                             loadRevision={slotLoadRevisions[meal.slotId] ?? 0}
@@ -2592,10 +2602,14 @@ export const RecommendedMealMenuPanel = forwardRef<
                             onLoadSlot={handleLoadSlot}
                             onDeleteSavedSlot={handleDeleteSavedSlot}
                             onApplyToNutrition={handleApplyMealToNutrition}
+                            onUnlockFromNutrition={handleUnlockMealFromNutrition}
                             onClearOrUndo={handleClearOrUndoMealComposition}
                             undoAvailable={Boolean(slotUndoSnapshots[meal.slotId])}
+                            isConfirmed={isMealSlotConfirmed(meal.slotId)}
+                            descriptionMode={descriptionMode}
                           />
                         ))}
+                        </div>
                       </div>
                     </CollapsibleSectionProvider>
                   </CollapsibleInlineSection>
@@ -2609,9 +2623,16 @@ export const RecommendedMealMenuPanel = forwardRef<
                 >
                   <CollapsibleSectionProvider>
                     <CollapsibleGroupToolbar className="mb-1.5" />
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {plan.meals.map((meal) => (
-                        <MealMenuCard
+                    <div
+                      className={cn(
+                        RECOMMENDATION_LIST_SCROLL_CLASS,
+                        "rounded-xl border border-border/40 bg-black/10 px-1 py-1"
+                      )}
+                      aria-label="끼니별 추천 메뉴 목록"
+                    >
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {plan.meals.map((meal) => (
+                          <MealMenuCard
                           key={`${meal.slotId}-${menuLoadRevision}-${plan.variantIndex}`}
                           meal={meal}
                           loadRevision={slotLoadRevisions[meal.slotId] ?? 0}
@@ -2628,11 +2649,14 @@ export const RecommendedMealMenuPanel = forwardRef<
                           onLoadSlot={handleLoadSlot}
                           onDeleteSavedSlot={handleDeleteSavedSlot}
                           onApplyToNutrition={handleApplyMealToNutrition}
+                          onUnlockFromNutrition={handleUnlockMealFromNutrition}
                           onClearOrUndo={handleClearOrUndoMealComposition}
                           undoAvailable={Boolean(slotUndoSnapshots[meal.slotId])}
-                          defaultOpen
+                          isConfirmed={isMealSlotConfirmed(meal.slotId)}
+                          descriptionMode={descriptionMode}
                         />
                       ))}
+                      </div>
                     </div>
                   </CollapsibleSectionProvider>
                 </CollapsibleInlineSection>
@@ -2642,8 +2666,21 @@ export const RecommendedMealMenuPanel = forwardRef<
                 undoAvailable={Boolean(allMealsUndoSnapshot)}
                 canClear={Boolean(plan?.meals.some((meal) => meal.items.length > 0))}
                 canApply={Boolean(plan?.meals.some((meal) => meal.items.length > 0))}
+                allConfirmed={Boolean(
+                  plan?.meals.some((meal) => meal.items.length > 0) &&
+                    plan.meals
+                      .filter((meal) => meal.items.length > 0)
+                      .every((meal) => isMealSlotConfirmed(meal.slotId))
+                )}
+                anyConfirmed={Boolean(
+                  plan?.meals.some(
+                    (meal) =>
+                      meal.items.length > 0 && isMealSlotConfirmed(meal.slotId)
+                  )
+                )}
                 onClearOrUndo={handleClearOrUndoAllMealCompositions}
                 onApplyAll={handleApplyAllMealsToNutrition}
+                onUnlockAll={handleUnlockAllMealsFromNutrition}
               />
             </div>
           </CollapsibleContent>

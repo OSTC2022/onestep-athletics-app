@@ -165,6 +165,39 @@ export function deleteSavedMealSlot(id: string): void {
   )
 }
 
+/** 식단 기록(LoggedFoodEntry)에서 끼니 메뉴 저장 */
+export function saveMealSlotFromLogEntries(
+  slotId: FoodMealSlotId,
+  label: string,
+  entries: Array<{ foodId: string; servingCount: number; name: string }>,
+  name?: string,
+  now = new Date()
+): SavedMealSlotRecord {
+  const items: SavedMealMenuItem[] = entries.map((entry) => ({
+    foodId: entry.foodId,
+    servings: entry.servingCount,
+  }))
+  const title =
+    entries
+      .map((entry) => entry.name)
+      .slice(0, 3)
+      .join(" · ") || label
+
+  const record: SavedMealSlotRecord = {
+    id: createId("slot"),
+    slotId,
+    label,
+    title,
+    items,
+    name: name?.trim() || defaultSlotName(slotId, now),
+    savedAt: now.toISOString(),
+  }
+
+  const all = listSavedMealSlots()
+  writeJson(SLOT_STORAGE_KEY, [record, ...all].slice(0, 40))
+  return record
+}
+
 export function formatSavedMenuSummary(items: SavedMealMenuItem[]): string {
   if (items.length === 0) return "항목 없음"
   return `${items.length}개 · ${items.map((item) => item.foodId).slice(0, 2).join(", ")}${items.length > 2 ? "…" : ""}`

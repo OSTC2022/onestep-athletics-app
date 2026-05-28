@@ -416,6 +416,17 @@ export function buildTodayNutritionCheckpoints(
   return checkpoints.slice(0, 5)
 }
 
+export function roundMacroG(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(value * 10) / 10
+}
+
 export function formatMacroG(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+  const rounded = roundMacroG(value)
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}
+
+export function formatMacroGNullable(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—"
+  return `${formatMacroG(value)}g`
 }

@@ -8,8 +8,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { formatCalories } from "@/lib/user-profile"
+import { formatMacroG, formatMacroGNullable } from "@/lib/food-nutrition-utils"
 import {
-  MEAL_TIMING_OPTIONS,
   NUTRITION_GOAL_OPTIONS,
   RECOMMENDATION_INTENSITY_OPTIONS,
   TRAINING_STATUS_OPTIONS,
@@ -23,6 +23,10 @@ import type {
   RecommendFoodsResponse,
 } from "@/lib/food-recommendation-types"
 import { cn } from "@/lib/utils"
+
+/** 추천 메뉴·조합 목록 — 휠·터치 드래그 스크롤 */
+export const RECOMMENDATION_LIST_SCROLL_CLASS =
+  "max-h-[min(440px,58dvh)] overflow-y-auto overscroll-y-contain touch-pan-y [scrollbar-gutter:stable]"
 
 type StrategyChipProps<T extends string> = {
   label: string
@@ -82,15 +86,20 @@ function DeficitBadge({ chip }: { chip: DeficitChip }) {
   )
 }
 
+function formatMacro(value: number | null | undefined): string {
+  return formatMacroGNullable(value)
+}
+
 function formatTargetRange(combo: RecommendFoodCombo): string {
   const r = combo.targetRange
   return `칼로리 ${r.calories.min}~${r.calories.max}kcal · 단백 ${r.protein.min}g+`
 }
 
-function ComboCard({
+export function ComboCard({
   combo,
   onSelectItem,
   onApplyCombo,
+  descriptionMode = "brief",
 }: {
   combo: RecommendFoodCombo
   onSelectItem?: (
@@ -98,7 +107,10 @@ function ComboCard({
     combo: RecommendFoodCombo
   ) => void
   onApplyCombo?: (combo: RecommendFoodCombo) => void
+  descriptionMode?: "brief" | "detailed"
 }) {
+  const detailed = descriptionMode === "detailed"
+
   return (
     <div className="rounded-xl border border-border/60 bg-black/20 px-3 py-3 space-y-2.5">
       <div className="space-y-1">
@@ -108,24 +120,34 @@ function ComboCard({
             {combo.level}
           </span>
         </div>
-        <p className="text-[10px] text-muted-foreground">{combo.situation}</p>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground mt-1">
-          <span>추천 목적: {combo.recommendedPurpose}</span>
-          <span>권장 끼니: {combo.recommendedSlotLabel}</span>
-          <span>평가 기준: {combo.evaluationCriteria.label}</span>
-          <span className="tabular-nums">{formatTargetRange(combo)}</span>
-        </div>
-        <p className="text-[11px] text-foreground/85 leading-relaxed mt-1">{combo.reason}</p>
-        <div className="flex flex-wrap gap-1 pt-0.5">
-          {combo.tags.map((tag) => (
-            <span
-              key={tag}
-              className="rounded border border-border/50 px-1.5 py-0.5 text-[9px] text-muted-foreground"
-            >
-              {tag}
-            </span>
-          ))}
-        </div>
+        {detailed ? (
+          <>
+            <p className="text-[10px] text-muted-foreground">{combo.situation}</p>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground mt-1">
+              <span>추천 목적: {combo.recommendedPurpose}</span>
+              <span>권장 끼니: {combo.recommendedSlotLabel}</span>
+              <span>평가 기준: {combo.evaluationCriteria.label}</span>
+              <span className="tabular-nums">{formatTargetRange(combo)}</span>
+            </div>
+            <p className="text-[11px] text-foreground/85 leading-relaxed mt-1">
+              {combo.reason}
+            </p>
+            <div className="flex flex-wrap gap-1 pt-0.5">
+              {combo.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded border border-border/50 px-1.5 py-0.5 text-[9px] text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="text-[10px] text-muted-foreground tabular-nums">
+            {combo.recommendedSlotLabel}
+          </p>
+        )}
       </div>
 
       <ul className="space-y-1 border-t border-border/40 pt-2">
@@ -138,10 +160,16 @@ function ComboCard({
             >
               <div className="min-w-0">
                 <p className="text-[12px] font-medium truncate">{item.nameKo}</p>
-                <p className="text-[10px] text-muted-foreground tabular-nums">
-                  {item.amountG}g · {item.calories}kcal · P{item.protein}g · C
-                  {item.carbs}g · F{item.fat}g
-                </p>
+                {detailed ? (
+                  <p className="text-[10px] text-muted-foreground tabular-nums">
+                    {item.amountG}g · {item.calories}kcal · P{formatMacroG(item.protein)}g · C
+                    {formatMacro(item.carbs)} · F{formatMacro(item.fat)}
+                  </p>
+                ) : (
+                  <p className="text-[10px] text-muted-foreground tabular-nums">
+                    {item.calories}kcal
+                  </p>
+                )}
               </div>
               {onSelectItem ? (
                 <span className="text-[10px] text-accent shrink-0">선택</span>
@@ -154,9 +182,15 @@ function ComboCard({
       <div className="rounded-lg border border-border/40 bg-secondary/10 px-2.5 py-2">
         <p className="text-[10px] text-muted-foreground mb-1">영양 합계</p>
         <p className="text-[11px] font-medium tabular-nums text-accent">
-          {formatCalories(combo.total.calories)}kcal · 단백 {combo.total.protein}g · 탄수{" "}
-          {combo.total.carbs}g · 지방 {combo.total.fat}g
-          {combo.total.fiber > 0 ? ` · 식이섬유 ${combo.total.fiber}g` : ""}
+          {detailed ? (
+            <>
+              {formatCalories(combo.total.calories)}kcal · 단백 {formatMacroG(combo.total.protein)}g · 탄수{" "}
+              {formatMacro(combo.total.carbs)} · 지방 {formatMacro(combo.total.fat)}
+              {combo.total.fiber > 0 ? ` · 식이섬유 ${formatMacroG(combo.total.fiber)}g` : ""}
+            </>
+          ) : (
+            <>{formatCalories(combo.total.calories)}kcal · 단백 {formatMacroG(combo.total.protein)}g</>
+          )}
         </p>
       </div>
 
@@ -188,7 +222,30 @@ export type NutritionRecommendationPanelProps = {
     combo: RecommendFoodCombo
   ) => void
   onApplyCombo?: (combo: RecommendFoodCombo) => void
+  descriptionMode?: "brief" | "detailed"
+  onDescriptionModeToggle?: () => void
   className?: string
+}
+
+function DescriptionModeToggleButton({
+  mode,
+  onToggle,
+}: {
+  mode: "brief" | "detailed"
+  onToggle: () => void
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-8 px-2.5 text-[11px] border-accent/30 text-accent hover:bg-accent/10 shrink-0"
+      onClick={onToggle}
+      aria-label={mode === "brief" ? "설명 상세히 보기" : "설명 간략히 보기"}
+    >
+      {mode === "brief" ? "설명 상세히" : "설명 간략히"}
+    </Button>
+  )
 }
 
 export function NutritionRecommendationPanel({
@@ -202,6 +259,8 @@ export function NutritionRecommendationPanel({
   onRefresh,
   onSelectItem,
   onApplyCombo,
+  descriptionMode = "brief",
+  onDescriptionModeToggle,
   className,
 }: NutritionRecommendationPanelProps) {
   const strategyTitle =
@@ -210,6 +269,12 @@ export function NutritionRecommendationPanel({
     response?.strategy.guidance ??
     "목표와 훈련 상태를 설정한 뒤 오늘 식단 추천을 받아보세요."
   const deficits = response?.deficits ?? []
+  const strategyDescription =
+    descriptionMode === "brief"
+      ? response?.strategy.title ?? strategyTitle
+      : response
+        ? `${response.summary}\n${response.strategy.guidance}`
+        : strategyGuidance
 
   return (
     <div className={cn("space-y-3", className)}>
@@ -224,8 +289,8 @@ export function NutritionRecommendationPanel({
               오늘의 영양 전략
             </p>
             <p className="text-[13px] font-semibold mt-0.5">{strategyTitle}</p>
-            <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
-              {response?.summary ?? strategyGuidance}
+            <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed whitespace-pre-line">
+              {strategyDescription}
             </p>
           </div>
         </div>
@@ -265,12 +330,6 @@ export function NutritionRecommendationPanel({
             options={TRAINING_STATUS_OPTIONS}
             value={settings.trainingStatus}
             onChange={(trainingStatus) => onSettingsChange({ trainingStatus })}
-          />
-          <StrategyChipRow
-            label="식사 타이밍"
-            options={MEAL_TIMING_OPTIONS}
-            value={settings.mealTiming}
-            onChange={(mealTiming) => onSettingsChange({ mealTiming })}
           />
           <StrategyChipRow
             label="추천 강도"
@@ -317,31 +376,79 @@ export function NutritionRecommendationPanel({
       {response?.recommendations.length ? (
         <div className="space-y-2.5">
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <p className="text-[10px] text-muted-foreground tabular-nums">
-              {response.mode} · {response.trainingStatus} · {response.mealTiming}
-              {response.relaxed ? " · 조건 완화" : ""}
-              {" · "}후보 {response.candidateCount}개
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 px-2.5 text-[11px] border-accent/30 text-accent hover:bg-accent/10"
-              onClick={onRefresh}
-            >
-              <RefreshCw className="h-3.5 w-3.5 mr-1" />
-              다른 조합
-            </Button>
+            <div className="min-w-0 space-y-1">
+              <p className="text-[10px] text-muted-foreground tabular-nums">
+                {response.mode} · {response.trainingStatus} · {response.mealTiming}
+                {response.relaxed ? " · 조건 완화" : ""}
+                {response.pipeline ? (
+                  <>
+                    {" · "}분석 {response.pipeline.afterScoringCount.toLocaleString("ko-KR")}개
+                    {" · "}표시 {response.recommendations.length}개 조합
+                  </>
+                ) : (
+                  <>{" · "}후보 {response.candidateCount}개</>
+                )}
+              </p>
+              {response.pipeline ? (
+                <p className="text-[9px] text-muted-foreground/80 tabular-nums leading-relaxed">
+                  DB {response.pipeline.totalFoodItems.toLocaleString("ko-KR")}개
+                  {" → "}1차 {response.pipeline.baseCandidateCount.toLocaleString("ko-KR")}개
+                  {" → "}필터 후 {response.pipeline.afterHardFilterCount.toLocaleString("ko-KR")}개
+                  {response.pipeline.afterQualityFilterCount != null ? (
+                    <>
+                      {" → "}품질검증 {response.pipeline.afterQualityFilterCount.toLocaleString("ko-KR")}개
+                    </>
+                  ) : null}
+                  {" → "}점수 통과 {response.pipeline.afterScoringCount.toLocaleString("ko-KR")}개
+                </p>
+              ) : null}
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {onDescriptionModeToggle ? (
+                <DescriptionModeToggleButton
+                  mode={descriptionMode}
+                  onToggle={onDescriptionModeToggle}
+                />
+              ) : null}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 px-2.5 text-[11px] border-accent/30 text-accent hover:bg-accent/10"
+                onClick={onRefresh}
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                다른 조합
+              </Button>
+            </div>
           </div>
-          <div className="grid gap-2.5 sm:grid-cols-2">
-            {response.recommendations.map((combo) => (
-              <ComboCard
-                key={combo.id}
-                combo={combo}
-                onSelectItem={onSelectItem}
-                onApplyCombo={onApplyCombo}
-              />
-            ))}
+          {response.pipelineMessages?.length ? (
+            <div className="rounded-lg border border-border/40 bg-secondary/10 px-2.5 py-2 space-y-1">
+              {response.pipelineMessages.map((msg) => (
+                <p key={msg} className="text-[10px] text-muted-foreground leading-relaxed">
+                  {msg}
+                </p>
+              ))}
+            </div>
+          ) : null}
+          <div
+            className={cn(
+              RECOMMENDATION_LIST_SCROLL_CLASS,
+              "rounded-xl border border-border/40 bg-black/10 px-1 py-1"
+            )}
+            aria-label="추천 식단 목록"
+          >
+            <div className="grid gap-2.5 sm:grid-cols-2">
+              {response.recommendations.map((combo) => (
+                <ComboCard
+                  key={combo.id}
+                  combo={combo}
+                  onSelectItem={onSelectItem}
+                  onApplyCombo={onApplyCombo}
+                  descriptionMode={descriptionMode}
+                />
+              ))}
+            </div>
           </div>
         </div>
       ) : null}

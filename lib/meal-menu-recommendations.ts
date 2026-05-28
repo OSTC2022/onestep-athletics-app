@@ -68,6 +68,7 @@ export type RecommendedMealSlot = {
   targetCalories: number
   estimatedCalories: number
   coachingNote: string
+  coachingNoteBrief: string
   nutrition: LoggedNutrition
   slotTargets: MealSlotMacroTargets
 }
@@ -75,6 +76,7 @@ export type RecommendedMealSlot = {
 export type DailyMealMenuPlan = {
   headline: string
   subtitle: string
+  subtitleBrief: string
   goalLabel: string
   trainingHint: string | null
   meals: RecommendedMealSlot[]
@@ -1659,6 +1661,57 @@ function getSubtitle(scenario: MenuScenario): string {
   }
 }
 
+function getSubtitleBrief(scenario: MenuScenario): string {
+  switch (scenario) {
+    case "loss-fast-training":
+      return "강감량·운동"
+    case "loss-fast-rest":
+      return "강감량·휴식"
+    case "loss-normal-training":
+      return "감량·운동"
+    case "loss-normal-rest":
+      return "감량·휴식"
+    case "maintain-training":
+      return "유지·운동"
+    case "maintain-rest":
+      return "유지·휴식"
+    case "gain-training":
+      return "증량·운동"
+    case "gain-rest":
+      return "증량·휴식"
+    case "performance":
+      return "경기력"
+  }
+}
+
+function shortenCoachingNote(note: string): string {
+  const tags: string[] = []
+  if (/고단백|단백/.test(note)) tags.push("단백")
+  if (/채소|나물|샐러드/.test(note)) tags.push("채소")
+  if (/복합탄수|현미|고구마|오트/.test(note)) tags.push("복합탄수")
+  if (/탄수.*(줄|최소|없|낮)|저탄수|정제탄수|밥·면|밥 없/.test(note)) {
+    tags.push("탄수↓")
+  }
+  if (/간식|가벼|저칼로리|100~200|100kcal|내외/.test(note)) tags.push("가벼움")
+  if (/과일|당류/.test(note)) tags.push("과일")
+  if (/회복/.test(note)) tags.push("회복")
+  if (/에너지|충전|드든/.test(note)) tags.push("에너지")
+  if (/증량|고칼로리|칼로리/.test(note)) tags.push("칼로리↑")
+  if (/균형/.test(note) && tags.length < 2) tags.push("균형")
+
+  const unique = [...new Set(tags)]
+  if (unique.length > 0) return unique.slice(0, 2).join("·")
+
+  const stripped =
+    note
+      .replace(/^(운동일|휴식일|강한\s?감량|증량|경기력)[^·]*·\s*/u, "")
+      .split(/[,，]/)[0]
+      ?.trim() ?? note
+
+  if (stripped.length <= 8) return stripped
+  return `${stripped.slice(0, 7)}…`
+}
+
 export function getMenuItemAlternatives(
   scenario: MenuScenario,
   slotId: FoodMealSlotId,
@@ -2192,6 +2245,7 @@ export function buildDailyMealMenuPlan(
         slotTarget,
         nutrition
       ),
+      coachingNoteBrief: shortenCoachingNote(slotMeal.note),
       nutrition,
       slotTargets: slotTarget,
     }
@@ -2215,6 +2269,7 @@ export function buildDailyMealMenuPlan(
   return {
     headline: getHeadline(scenario, profile.goalType),
     subtitle: getSportsNutritionSubtitle(scenario, coachingMode, targets),
+    subtitleBrief: getSubtitleBrief(scenario),
     goalLabel,
     trainingHint,
     meals,

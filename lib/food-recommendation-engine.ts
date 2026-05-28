@@ -1,5 +1,11 @@
 import type { LoggedNutrition } from "@/lib/food-nutrition-utils"
 import {
+  isIndulgentFood,
+  isPresentMacro,
+  isStrictDietExcludedFood,
+  strictDietFoodPenalty,
+} from "@/lib/food-nutrition-quality"
+import {
   buildTargetRangeForCombo,
   evaluationCriteriaForTemplate,
   intendedSlotToApplySlot,
@@ -22,10 +28,18 @@ import {
   mealTimingToContext,
   proteinVariant,
   trainingStatusToIntensity,
-  type NutritionStrategySettings,
-  type StrategyProfile,
 } from "@/lib/food-recommendation-strategy"
-import { fetchRecommendationCandidates } from "@/lib/food-items-candidates"
+import type {
+  NutritionStrategySettings,
+  StrategyProfile,
+} from "@/lib/food-recommendation-strategy"
+import {
+  fetchRecommendationCandidatesWide,
+  fetchRelaxedRecommendationCandidates,
+  getAllRecommendationBuckets,
+} from "@/lib/food-items-candidates"
+import type { CandidateFetchStats } from "@/lib/food-items-candidates"
+import { analyzeNutritionState } from "@/lib/nutrition-deficit-analysis"
 import type {
   FoodCandidate,
   MealContext,
@@ -34,13 +48,15 @@ import type {
   RecommendFoodItem,
   RecommendFoodsRequest,
   RecommendFoodsResponse,
+  RecommendationPipelineStats,
   ScoredCandidate,
   TrainingIntensity,
 } from "@/lib/food-recommendation-types"
 
-const MIN_SCORE = 28
-const POOL_SIZE = 120
+const MIN_SCORE = 20
+const POOL_SIZE = 300
 const MAX_COMBOS = 8
+const RELAXED_CANDIDATE_THRESHOLD = 500
 
 export function createSeededRandom(seed: number): () => number {
   let t = seed >>> 0
@@ -88,73 +104,32 @@ export function inferMealContext(
   return "snack"
 }
 
-export function analyzeNutritionState(
-  req: RecommendFoodsRequest,
-  mealContext: MealContext,
-  hasTraining: boolean,
-  settings: NutritionStrategySettings
-): NutritionDeficitAnalysis {
-  const t = req.targets
-  const c = req.consumed
-  const targetFiber = t.fiberG ?? 25
-  const targetSodium = t.sodiumMg ?? 2000
-  const targetSugar = t.sugarG ?? 50
+export { analyzeNutritionState } from "@/lib/nutrition-deficit-analysis"
 
-  const calorieGap = t.calories - c.calories
-  const proteinGap = t.proteinG - c.proteinG
-  const carbsGap = t.carbsG - c.carbsG
-  const fatGap = t.fatG - c.fatG
-  const fiberGap = targetFiber - c.fiberG
-  const sodiumExcess = c.sodiumMg - targetSodium
-  const sugarExcess = c.sugarG - targetSugar
+function macroNum(value: number | null | undefined): number | null {
+  return isPresentMacro(value) ? value : null
+}
 
-  const flags: string[] = []
-
-  if (calorieGap > 120) flags.push("calorie_low")
-  if (proteinGap > 15) flags.push("protein_low")
-  if (carbsGap > 25) flags.push("carbs_low")
-  if (fatGap < -15) flags.push("fat_high")
-  if (fiberGap > 5) flags.push("fiber_low")
-  if (sodiumExcess > 400) flags.push("sodium_high")
-  if (sugarExcess > 15) flags.push("sugar_high")
-
-  if (
-    hasTraining &&
-    (mealContext === "post_workout" ||
-      settings.mealTiming === "post_workout" ||
-      settings.trainingStatus === "recovering" ||
-      settings.trainingStatus === "long_lsd")
-  ) {
-    flags.push("post_workout")
-  }
-  if (mealContext === "dinner" || settings.mealTiming === "late_night_prevention") {
-    flags.push("light_dinner")
-  }
-  if (mealContext === "snack" || settings.mealTiming === "convenience") {
-    flags.push("convenience")
-  }
-  if (mealContext === "pre_workout" || settings.mealTiming === "pre_workout") {
-    flags.push("pre_workout")
-  }
-
-  return {
-    calorieGap,
-    proteinGap,
-    carbsGap,
-    fatGap,
-    fiberGap,
-    sodiumExcess,
-    sugarExcess,
-    flags,
-  }
+function scaleMacro(
+  value: number | null | undefined,
+  factor: number,
+  round = true
+): number | null {
+  if (!isPresentMacro(value)) return null
+  const scaled = value * factor
+  return round ? Math.round(scaled * 10) / 10 : Math.round(scaled)
 }
 
 function fiberPer100(c: FoodCandidate): number {
-  return c.per100g.fiberG ?? estimateFiber(c)
+  if (isPresentMacro(c.per100g.fiberG)) return c.per100g.fiberG
+  return estimateFiber(c)
 }
 
-function sugarPer100(c: FoodCandidate): number {
-  return c.per100g.sugarG ?? c.per100g.carbsG * 0.2
+function sugarPer100(c: FoodCandidate): number | null {
+  if (isPresentMacro(c.per100g.sugarG)) return c.per100g.sugarG
+  const carbs = macroNum(c.per100g.carbsG)
+  if (carbs == null) return null
+  return carbs * 0.2
 }
 
 function estimateFiber(c: FoodCandidate): number {
@@ -187,53 +162,109 @@ function scoreCandidate(
   mealContext: MealContext,
   recentIds: Set<string>,
   trainingIntensity: TrainingIntensity,
-  profile: StrategyProfile
+  profile: StrategyProfile,
+  intensity: NutritionStrategySettings["intensity"]
 ): number {
   const p = c.per100g
+  const protein = macroNum(p.proteinG)
+  const carbs = macroNum(p.carbsG)
+  const fat = macroNum(p.fatG)
+  const sodium = macroNum(p.sodiumMg)
+  const calories = macroNum(p.calories) ?? 0
+  const sugar = sugarPer100(c)
   let score = 40
 
-  if (analysis.flags.includes("protein_low") && p.proteinG >= 8) {
-    score += Math.min(25, p.proteinG * 1.5) * profile.proteinWeight
+  if (c.dataQuality === "complete") score += 10
+  if (c.dataQuality === "partial") score -= 18
+  if (c.dataQuality === "suspicious" || c.dataQuality === "invalid") score -= 120
+
+  if (intensity === "strict_loss" || intensity === "aggressive_diet") {
+    if (carbs == null) score -= 30
+    if (fat == null) score -= 30
+    if (sodium == null) score -= 18
+  } else if (intensity === "realistic_diet") {
+    if (carbs == null) score -= 12
+    if (fat == null) score -= 12
+    if (sodium == null) score -= 8
   }
-  if (profile.preferHighProtein && p.proteinG >= 10) {
-    score += Math.min(18, p.proteinG) * (profile.proteinWeight - 0.5)
+
+  score += strictDietFoodPenalty(c.nameKo, c.category, intensity)
+
+  if (analysis.flags.includes("protein_low") && protein != null && protein >= 8) {
+    score += Math.min(25, protein * 1.5) * profile.proteinWeight
   }
-  if (analysis.flags.includes("calorie_low") && p.calories >= 80 && p.calories <= profile.calorieMaxPer100g) {
+  if (profile.preferHighProtein && protein != null && protein >= 10) {
+    score += Math.min(18, protein) * (profile.proteinWeight - 0.5)
+  }
+  if (
+    analysis.flags.includes("calorie_low") &&
+    calories >= 80 &&
+    calories <= profile.calorieMaxPer100g
+  ) {
     score += 12
   }
-  if ((analysis.flags.includes("carbs_low") || profile.preferHighCarb) && p.carbsG >= 15) {
-    score += Math.min(18, p.carbsG * 0.4) * profile.carbWeight
+  if (
+    (analysis.flags.includes("carbs_low") || profile.preferHighCarb) &&
+    carbs != null &&
+    carbs >= 15
+  ) {
+    score += Math.min(18, carbs * 0.4) * profile.carbWeight
   }
   if ((analysis.flags.includes("fiber_low") || profile.preferSatiety) && fiberPer100(c) >= 2) {
     score += Math.min(20, fiberPer100(c) * 4) * profile.fiberWeight
   }
-  if (analysis.flags.includes("sodium_high") && p.sodiumMg < 400) {
+  if (analysis.flags.includes("sodium_high") && sodium != null && sodium < 400) {
     score += 15 * profile.sodiumPenalty
   }
-  if (settingsSodiumControl(profile) && p.sodiumMg > 600) {
+  if (settingsSodiumControl(profile) && sodium != null && sodium > 600) {
     score -= 20 * profile.sodiumPenalty
   }
   if (c.bucket === "soup_stew" && analysis.flags.includes("sodium_high")) {
     score -= 25 * profile.sodiumPenalty
   }
-  if ((analysis.flags.includes("fat_high") || profile.preferLowFat) && p.fatG < 8) {
+  if ((analysis.flags.includes("fat_high") || profile.preferLowFat) && fat != null && fat < 8) {
     score += 12 * profile.fatPenalty
   }
-  if (profile.preferLowFat && p.fatG > 15) {
-    score -= 15 * profile.fatPenalty
+  if (profile.preferLowFat && fat != null && fat > 15) {
+    score -= 12 * profile.fatPenalty
   }
-  if (analysis.flags.includes("sugar_high") && sugarPer100(c) < 8) {
+  if (profile.preferLowFat && fat != null && fat > 25) {
+    score -= 10 * profile.fatPenalty
+  }
+  if (analysis.flags.includes("sugar_high") && sugar != null && sugar < 8) {
     score += 10
   }
 
-  if (mealContext === "dinner" && p.fatG > 18) score -= 15 * profile.fatPenalty
-  if (mealContext === "dinner" && p.calories > profile.calorieMaxPer100g) score -= 10
-  if (mealContext === "pre_workout" && p.fatG > 12) score -= 18
-  if (mealContext === "pre_workout" && p.carbsG >= 15 && p.fatG < 8) score += 20
-  if (mealContext === "post_workout" && p.proteinG >= 5 && p.carbsG >= 10) {
+  if (mealContext === "dinner" && fat != null && fat > 18) score -= 12 * profile.fatPenalty
+  if (mealContext === "dinner" && calories > profile.calorieMaxPer100g) score -= 8
+  if (mealContext === "pre_workout" && fat != null && fat > 12) score -= 14
+  if (trainingIntensity === "none" && calories > 350) score -= 8
+  if (
+    (mealContext === "lunch" || mealContext === "dinner") &&
+    (c.bucket === "korean_meal" ||
+      c.bucket === "high_protein" ||
+      c.bucket === "fish_seafood" ||
+      c.bucket === "egg_tofu_bean" ||
+      c.bucket === "salad_veggie")
+  ) {
+    score += 8
+  }
+  if (mealContext === "snack" && calories >= 50 && calories <= 300) {
+    score += 10
+  }
+  if (mealContext === "pre_workout" && carbs != null && carbs >= 15 && (fat == null || fat < 8)) {
+    score += 20
+  }
+  if (
+    mealContext === "post_workout" &&
+    protein != null &&
+    protein >= 5 &&
+    carbs != null &&
+    carbs >= 10
+  ) {
     score += 18
   }
-  if (trainingIntensity === "high" && p.carbsG >= 12) score += 8
+  if (trainingIntensity === "high" && carbs != null && carbs >= 12) score += 8
 
   const bucketBoost = profile.bucketBoost[c.bucket]
   if (bucketBoost && bucketBoost > 1) {
@@ -245,7 +276,7 @@ function scoreCandidate(
 
   if (recentIds.has(c.id)) score -= 35
 
-  if (p.calories <= 0 || p.proteinG < 0) score -= 50
+  if (calories <= 0 || (protein != null && protein < 0)) score -= 50
 
   return Math.max(0, Math.round(score))
 }
@@ -258,13 +289,13 @@ function nutritionAtGrams(c: FoodCandidate, grams: number) {
   const f = grams / 100
   const p = c.per100g
   return {
-    calories: Math.round(p.calories * f),
-    protein: Math.round(p.proteinG * f * 10) / 10,
-    carbs: Math.round(p.carbsG * f * 10) / 10,
-    fat: Math.round(p.fatG * f * 10) / 10,
-    fiber: Math.round(fiberPer100(c) * f * 10) / 10,
-    sodium: Math.round(p.sodiumMg * f),
-    sugar: Math.round(sugarPer100(c) * f * 10) / 10,
+    calories: Math.round((macroNum(p.calories) ?? 0) * f),
+    protein: scaleMacro(p.proteinG, f) ?? 0,
+    carbs: scaleMacro(p.carbsG, f),
+    fat: scaleMacro(p.fatG, f),
+    fiber: scaleMacro(fiberPer100(c), f) ?? 0,
+    sodium: isPresentMacro(p.sodiumMg) ? Math.round(p.sodiumMg * f) : null,
+    sugar: sugarPer100(c) != null ? scaleMacro(sugarPer100(c), f) : null,
   }
 }
 
@@ -300,7 +331,13 @@ function toRecommendItem(c: FoodCandidate, grams: number): RecommendFoodItem {
     fiber: n.fiber,
     sodium: n.sodium,
     sugar: n.sugar,
+    dataQuality: c.dataQuality,
   }
+}
+
+function sumNullable(a: number | null, b: number | null): number | null {
+  if (a == null && b == null) return null
+  return Math.round(((a ?? 0) + (b ?? 0)) * 10) / 10
 }
 
 function sumItems(items: RecommendFoodItem[]) {
@@ -308,13 +345,30 @@ function sumItems(items: RecommendFoodItem[]) {
     (acc, item) => ({
       calories: acc.calories + item.calories,
       protein: Math.round((acc.protein + item.protein) * 10) / 10,
-      carbs: Math.round((acc.carbs + item.carbs) * 10) / 10,
-      fat: Math.round((acc.fat + item.fat) * 10) / 10,
+      carbs: sumNullable(acc.carbs, item.carbs),
+      fat: sumNullable(acc.fat, item.fat),
       fiber: Math.round((acc.fiber + item.fiber) * 10) / 10,
-      sodium: acc.sodium + item.sodium,
+      sodium: sumNullable(acc.sodium, item.sodium),
     }),
-    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sodium: 0 }
+    {
+      calories: 0,
+      protein: 0,
+      carbs: null as number | null,
+      fat: null as number | null,
+      fiber: 0,
+      sodium: null as number | null,
+    }
   )
+}
+
+function candidateNameKey(c: FoodCandidate | ScoredCandidate): string {
+  const rep = c.representativeName?.trim()
+  if (rep && rep.length >= 2) return rep.toLowerCase()
+  return c.nameKo
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\s+/g, "")
+    .slice(0, 16)
+    .toLowerCase()
 }
 
 function weightedSample(
@@ -327,6 +381,7 @@ function weightedSample(
 
   const picked: ScoredCandidate[] = []
   const used = new Set<string>()
+  const usedNameKeys = new Set<string>()
   const bucketCount = new Map<string, number>()
   const proteinVariants = new Set<string>()
 
@@ -334,7 +389,8 @@ function weightedSample(
     const candidates = eligible.filter(
       (c) =>
         !used.has(c.id) &&
-        (bucketCount.get(c.bucket) ?? 0) < 2 &&
+        !usedNameKeys.has(candidateNameKey(c)) &&
+        (bucketCount.get(c.bucket) ?? 0) < 3 &&
         (c.role !== "protein" ||
           !proteinVariants.has(c.proteinVariant ?? proteinVariant(c.nameKo)))
     )
@@ -354,6 +410,7 @@ function weightedSample(
 
     picked.push(chosen)
     used.add(chosen.id)
+    usedNameKeys.add(candidateNameKey(chosen))
     bucketCount.set(chosen.bucket, (bucketCount.get(chosen.bucket) ?? 0) + 1)
     if (chosen.role === "protein") {
       proteinVariants.add(chosen.proteinVariant ?? proteinVariant(chosen.nameKo))
@@ -368,18 +425,25 @@ function pickByRole(
   role: ScoredCandidate["role"],
   rand: () => number,
   exclude: Set<string>,
-  proteinVariants: Set<string>
+  proteinVariants: Set<string>,
+  excludeNameKeys: Set<string>
 ): ScoredCandidate | null {
   const filtered = pool.filter(
     (c) =>
       c.role === role &&
       !exclude.has(c.id) &&
+      !excludeNameKeys.has(candidateNameKey(c)) &&
       c.score >= MIN_SCORE &&
       (role !== "protein" ||
         !proteinVariants.has(c.proteinVariant ?? proteinVariant(c.nameKo)))
   )
   if (filtered.length === 0) {
-    const fallback = pool.filter((c) => !exclude.has(c.id) && c.score >= MIN_SCORE)
+    const fallback = pool.filter(
+      (c) =>
+        !exclude.has(c.id) &&
+        !excludeNameKeys.has(candidateNameKey(c)) &&
+        c.score >= MIN_SCORE
+    )
     if (fallback.length === 0) return null
     return weightedSample(fallback, 1, rand)[0] ?? null
   }
@@ -544,6 +608,37 @@ const COMBO_TEMPLATES: ComboTemplate[] = [
     when: () => true,
   },
   {
+    id: "indulgent_adjust",
+    title: "가끔 먹는 음식 조절 버전",
+    level: "현실적인 다이어트식",
+    situation: "피자·치킨 등은 소량 + 채소·단백질로 균형 맞추기",
+    tags: ["소량 조절", "현실식"],
+    reason: () =>
+      "엄격한 제외 대신 소량만 포함하고 샐러드·단백질로 전체 칼로리와 영양 균형을 맞췄습니다.",
+    roles: [{ role: "any" }, { role: "veg" }, { role: "protein", optional: true }],
+    when: (_, __, s) => s.intensity === "realistic_diet",
+  },
+  {
+    id: "light_cleanup",
+    title: "가벼운 정리식",
+    level: "저녁 가벼운 식사",
+    situation: "칼로리·지방·나트륨이 높을 때 추가 식사 대신 정리",
+    tags: ["가벼운 정리", "나트륨 조절", "저지방"],
+    reason: (a) => {
+      const parts: string[] = []
+      if (a.flags.includes("calorie_high")) parts.push("칼로리가 이미 충분")
+      if (a.flags.includes("fat_high")) parts.push("지방 섭취가 높음")
+      if (a.flags.includes("sodium_high")) parts.push("나트륨이 높음")
+      return parts.length > 0
+        ? `${parts.join(", ")} — 추가 고칼로리 식사 대신 단백질·채소 위주의 가벼운 정리식을 추천합니다.`
+        : "오늘 섭취량을 고려해 가볍게 정리하기 좋은 조합입니다."
+    },
+    roles: [{ role: "protein" }, { role: "veg" }],
+    when: (a) =>
+      a.flags.includes("calorie_high") ||
+      (a.flags.includes("fat_high") && a.flags.includes("sodium_high")),
+  },
+  {
     id: "gap_fill",
     title: "부족 영양소 보완식",
     level: "운동하는 사람용 균형식",
@@ -575,10 +670,34 @@ const COMBO_TEMPLATES: ComboTemplate[] = [
 
 function sortTemplatesByPriority(
   templates: ComboTemplate[],
-  profile: StrategyProfile
+  profile: StrategyProfile,
+  focus?: RecommendFoodsRequest["recommendationFocus"]
 ): ComboTemplate[] {
+  const FOCUS_BOOST: Record<string, string[]> = {
+    "protein-low": ["high_protein_low_fat", "gap_fill", "post_workout", "korean_adjust"],
+    "fiber-low": ["satiety", "gap_fill", "korean_adjust"],
+    "calorie-low": ["gap_fill", "post_workout", "fat_loss_realistic", "pre_run_energy"],
+    "carbs-low": ["pre_run_energy", "post_workout", "gap_fill"],
+    "sugar-warn": ["light_dinner", "light_cleanup", "high_protein_low_fat", "snack_light"],
+    "fat-warn": ["high_protein_low_fat", "light_dinner", "light_cleanup"],
+    "sodium-warn": ["light_cleanup", "light_dinner", "korean_adjust", "high_protein_low_fat"],
+    "calorie-high": ["light_cleanup", "light_dinner", "snack_light"],
+    deficit_fill: ["gap_fill", "high_protein_low_fat", "satiety", "post_workout"],
+    excess_control: ["light_cleanup", "light_dinner", "snack_light", "high_protein_low_fat"],
+  }
+
+  const boost = focus ? (FOCUS_BOOST[focus] ?? []) : []
   const priority = profile.templatePriority
+
   return [...templates].sort((a, b) => {
+    const aBoost = boost.indexOf(a.id)
+    const bBoost = boost.indexOf(b.id)
+    if (aBoost !== -1 || bBoost !== -1) {
+      const aRank = aBoost === -1 ? 999 : aBoost
+      const bRank = bBoost === -1 ? 999 : bBoost
+      if (aRank !== bRank) return aRank - bRank
+    }
+
     const ai = priority.indexOf(a.id)
     const bi = priority.indexOf(b.id)
     const aRank = ai === -1 ? 999 : ai
@@ -599,11 +718,11 @@ function scaleRecommendItems(
     amountG: Math.max(25, Math.round(item.amountG * factor)),
     calories: Math.round(item.calories * factor),
     protein: Math.round(item.protein * factor * 10) / 10,
-    carbs: Math.round(item.carbs * factor * 10) / 10,
-    fat: Math.round(item.fat * factor * 10) / 10,
+    carbs: item.carbs != null ? Math.round(item.carbs * factor * 10) / 10 : null,
+    fat: item.fat != null ? Math.round(item.fat * factor * 10) / 10 : null,
     fiber: Math.round(item.fiber * factor * 10) / 10,
-    sodium: Math.round(item.sodium * factor),
-    sugar: Math.round(item.sugar * factor * 10) / 10,
+    sodium: item.sodium != null ? Math.round(item.sodium * factor) : null,
+    sugar: item.sugar != null ? Math.round(item.sugar * factor * 10) / 10 : null,
   }))
 }
 
@@ -612,6 +731,77 @@ function snackPortionScale(settings: NutritionStrategySettings): number {
     return 0.85
   }
   return 0.65
+}
+
+const INDULGENT_TEMPLATE_IDS = new Set([
+  "fat_loss_realistic",
+  "korean_adjust",
+  "convenience",
+  "indulgent_adjust",
+])
+
+function filterPoolForCombo(
+  pool: ScoredCandidate[],
+  template: ComboTemplate,
+  settings: NutritionStrategySettings
+): ScoredCandidate[] {
+  const intensity = settings.intensity
+
+  return pool.filter((c) => {
+    if (c.dataQuality === "suspicious" || c.dataQuality === "invalid") return false
+
+    const indulgent = isIndulgentFood(c.nameKo, c.category)
+    const strictExcluded = isStrictDietExcludedFood(c.nameKo, c.category)
+
+    if (intensity === "strict_loss" || intensity === "aggressive_diet") {
+      if (strictExcluded || indulgent) return false
+      if (c.dataQuality === "partial") return false
+    }
+
+    if (indulgent) {
+      if (intensity === "realistic_diet") {
+        return INDULGENT_TEMPLATE_IDS.has(template.id)
+      }
+      return false
+    }
+
+    if (template.id === "indulgent_adjust") return false
+
+    return true
+  })
+}
+
+function indulgentPortionScale(c: FoodCandidate): number {
+  return isIndulgentFood(c.nameKo, c.category) ? 0.35 : 1
+}
+
+function pickIndulgentAdjustLead(
+  pool: ScoredCandidate[],
+  rand: () => number,
+  exclude: Set<string>,
+  excludeNameKeys: Set<string>
+): ScoredCandidate | null {
+  const indulgent = pool.filter(
+    (c) =>
+      isIndulgentFood(c.nameKo, c.category) &&
+      !exclude.has(c.id) &&
+      !excludeNameKeys.has(candidateNameKey(c)) &&
+      c.score >= MIN_SCORE &&
+      c.dataQuality === "complete"
+  )
+  if (indulgent.length === 0) {
+    const partial = pool.filter(
+      (c) =>
+        isIndulgentFood(c.nameKo, c.category) &&
+        !exclude.has(c.id) &&
+        !excludeNameKeys.has(candidateNameKey(c)) &&
+        c.score >= MIN_SCORE &&
+        c.dataQuality === "partial"
+    )
+    if (partial.length === 0) return null
+    return weightedSample(partial, 1, rand)[0] ?? null
+  }
+  return weightedSample(indulgent, 1, rand)[0] ?? null
 }
 
 function buildComboFromTemplate(
@@ -624,7 +814,11 @@ function buildComboFromTemplate(
   rand: () => number,
   variantSeed: number
 ): RecommendFoodCombo | null {
+  const comboPool = filterPoolForCombo(pool, template, settings)
+  if (comboPool.length === 0) return null
+
   const used = new Set<string>()
+  const usedNameKeys = new Set<string>()
   const proteinVariants = new Set<string>()
   const items: RecommendFoodItem[] = []
   const isSnack =
@@ -633,16 +827,34 @@ function buildComboFromTemplate(
     settings.mealTiming === "pre_workout"
 
   for (const slot of template.roles) {
-    const picked = pickByRole(pool, slot.role, rand, used, proteinVariants)
+    let picked: ScoredCandidate | null = null
+    if (
+      template.id === "indulgent_adjust" &&
+      slot.role === "any" &&
+      items.length === 0
+    ) {
+      picked = pickIndulgentAdjustLead(comboPool, rand, used, usedNameKeys)
+    } else {
+      picked = pickByRole(
+        comboPool,
+        slot.role,
+        rand,
+        used,
+        proteinVariants,
+        usedNameKeys
+      )
+    }
     if (!picked) {
       if (slot.optional) continue
       return null
     }
     used.add(picked.id)
+    usedNameKeys.add(candidateNameKey(picked))
     if (picked.role === "protein") {
       proteinVariants.add(picked.proteinVariant ?? proteinVariant(picked.nameKo))
     }
     let grams = defaultPortionG(picked, picked.role, profile)
+    grams = Math.round(grams * indulgentPortionScale(picked))
     if (isSnack) grams = Math.round(grams * snackPortionScale(settings))
     items.push(toRecommendItem(picked, grams))
   }
@@ -711,6 +923,37 @@ function buildComboFromTemplate(
   }
 }
 
+function buildPipelineMessages(
+  pipeline: RecommendationPipelineStats
+): string[] {
+  const messages: string[] = []
+  const total = pipeline.totalFoodItems
+  const scored = pipeline.afterScoringCount
+
+  if (total > 0 && scored > 0) {
+    messages.push(
+      `공식 DB ${total.toLocaleString("ko-KR")}개 중 오늘 조건에 맞는 후보 ${scored.toLocaleString("ko-KR")}개를 분석했습니다.`
+    )
+  }
+
+  if (pipeline.relaxed) {
+    messages.push("현재 설정이 좁아 일부 조건을 완화해 더 넓은 후보군에서 추천했습니다.")
+  }
+
+  messages.push(
+    "영양 데이터가 불완전하거나 의심스러운 음식(suspicious/invalid)은 추천에서 제외했습니다."
+  )
+  messages.push("엄격한 감량식에서는 피자·튀김·디저트 등 가공/간식류를 대표 추천에서 제외합니다.")
+
+  if (pipeline.selectedRecommendationCount > 0) {
+    messages.push(
+      `최종 ${pipeline.selectedRecommendationCount}개 조합을 표시합니다. (점수 풀 ${pipeline.finalCandidateCount}개)`
+    )
+  }
+
+  return messages
+}
+
 function buildResponseMeta(
   req: RecommendFoodsRequest,
   settings: NutritionStrategySettings,
@@ -718,15 +961,18 @@ function buildResponseMeta(
   analysis: NutritionDeficitAnalysis,
   mealContext: MealContext,
   recommendations: RecommendFoodCombo[],
-  candidateCount: number,
-  relaxed?: boolean
+  pipeline: RecommendationPipelineStats
 ): RecommendFoodsResponse {
+  const pipelineMessages = buildPipelineMessages(pipeline)
+
   return {
     recommendations,
     analysis,
     mealContext,
-    candidateCount,
-    relaxed,
+    candidateCount: pipeline.afterScoringCount,
+    relaxed: pipeline.relaxed,
+    pipeline,
+    pipelineMessages,
     mode: labelForGoal(settings.goal),
     trainingStatus: labelForTraining(settings.trainingStatus),
     mealTiming: labelForMealTiming(settings.mealTiming),
@@ -740,10 +986,26 @@ function buildResponseMeta(
   }
 }
 
+function filterCandidatesForEngine(
+  candidates: FoodCandidate[],
+  intensity: NutritionStrategySettings["intensity"]
+): FoodCandidate[] {
+  return candidates.filter((c) => {
+    if (c.dataQuality === "invalid" || c.dataQuality === "suspicious") return false
+    if (intensity === "strict_loss" || intensity === "aggressive_diet") {
+      if (isStrictDietExcludedFood(c.nameKo, c.category)) return false
+      if (c.dataQuality === "partial") return false
+    }
+    return true
+  })
+}
+
 function runEngine(
   req: RecommendFoodsRequest,
   candidates: FoodCandidate[],
-  relaxed: boolean
+  fetchStats: CandidateFetchStats,
+  relaxed: boolean,
+  relaxationNotes: string[] = []
 ): RecommendFoodsResponse {
   const settings = resolveStrategySettings(req)
   const profile = buildStrategyProfile(settings)
@@ -756,7 +1018,9 @@ function runEngine(
   const analysis = analyzeNutritionState(req, mealContext, hasTraining, settings)
   const recentIds = new Set(req.recentFoodIds ?? [])
 
-  const scored: ScoredCandidate[] = candidates.map((c) => ({
+  const qualityFiltered = filterCandidatesForEngine(candidates, settings.intensity)
+
+  const scored: ScoredCandidate[] = qualityFiltered.map((c) => ({
     ...c,
     proteinVariant: c.proteinVariant ?? proteinVariant(c.nameKo),
     role: inferRole(c),
@@ -766,11 +1030,13 @@ function runEngine(
       mealContext,
       recentIds,
       trainingIntensity,
-      profile
+      profile,
+      settings.intensity
     ),
   }))
 
   scored.sort((a, b) => b.score - a.score)
+  const afterScoringCount = scored.filter((c) => c.score >= MIN_SCORE).length
   const topPool = scored.slice(0, POOL_SIZE)
 
   const seed =
@@ -782,7 +1048,11 @@ function runEngine(
 
   const recommendations: RecommendFoodCombo[] = []
   const usedComboIds = new Set(req.recentRecommendationIds ?? [])
-  const sortedTemplates = sortTemplatesByPriority(COMBO_TEMPLATES, profile)
+  const sortedTemplates = sortTemplatesByPriority(
+    COMBO_TEMPLATES,
+    profile,
+    req.recommendationFocus
+  )
 
   for (const template of sortedTemplates) {
     if (!templateAllowedForMealTiming(template.id, settings.mealTiming)) continue
@@ -803,7 +1073,13 @@ function runEngine(
   }
 
   if (recommendations.length === 0 && topPool.length > 0) {
-    const singles = weightedSample(topPool, 3, rand)
+    const safePool = topPool.filter(
+      (c) =>
+        c.dataQuality !== "suspicious" &&
+        c.dataQuality !== "invalid" &&
+        !isStrictDietExcludedFood(c.nameKo, c.category)
+    )
+    const singles = weightedSample(safePool.length > 0 ? safePool : topPool, 3, rand)
     for (const s of singles) {
       const grams = defaultPortionG(s, s.role, profile)
       const item = toRecommendItem(s, grams)
@@ -846,6 +1122,33 @@ function runEngine(
     }
   }
 
+  const pipeline: RecommendationPipelineStats = {
+    totalFoodItems: fetchStats.totalFoodItems,
+    baseCandidateCount: fetchStats.baseCandidateCount,
+    afterHardFilterCount: fetchStats.afterHardFilterCount,
+    afterQualityFilterCount: qualityFiltered.length,
+    afterScoringCount,
+    finalCandidateCount: topPool.length,
+    selectedRecommendationCount: recommendations.length,
+    appliedFilters: fetchStats.appliedFilters,
+    fetchMethods: fetchStats.fetchMethods,
+    relaxed,
+    relaxationNotes: relaxationNotes.length > 0 ? relaxationNotes : undefined,
+  }
+
+  console.log("[recommend-foods] pipeline", {
+    totalFoodItems: pipeline.totalFoodItems,
+    baseCandidateCount: pipeline.baseCandidateCount,
+    afterHardFilterCount: pipeline.afterHardFilterCount,
+    afterQualityFilterCount: pipeline.afterQualityFilterCount,
+    afterScoringCount: pipeline.afterScoringCount,
+    finalCandidateCount: pipeline.finalCandidateCount,
+    selectedRecommendationCount: pipeline.selectedRecommendationCount,
+    appliedFilters: pipeline.appliedFilters,
+    fetchMethods: pipeline.fetchMethods,
+    relaxed: pipeline.relaxed,
+  })
+
   return buildResponseMeta(
     req,
     settings,
@@ -853,8 +1156,7 @@ function runEngine(
     analysis,
     mealContext,
     recommendations,
-    candidates.length,
-    relaxed
+    pipeline
   )
 }
 
@@ -869,33 +1171,52 @@ export async function generateFoodRecommendations(
   const analysis = analyzeNutritionState(req, mealContext, hasTraining, settings)
   const buckets = bucketsForStrategy(analysis.flags, profile, settings)
 
-  let candidates = await fetchRecommendationCandidates(buckets, 35)
+  let fetchResult = await fetchRecommendationCandidatesWide(buckets)
   let relaxed = false
+  const relaxationNotes: string[] = []
 
-  if (candidates.length < 40) {
+  if (fetchResult.stats.afterHardFilterCount < RELAXED_CANDIDATE_THRESHOLD) {
     relaxed = true
-    candidates = await fetchRecommendationCandidates(
-      [
-        "korean_meal",
-        "high_protein",
-        "carbs_starch",
-        "salad_veggie",
-        "egg_tofu_bean",
-        "fish_seafood",
-        "convenience",
-        "fruit",
-        "dairy_yogurt",
-      ],
-      45
+    relaxationNotes.push(
+      `1차 후보 ${fetchResult.stats.afterHardFilterCount}개 → 전체 버킷·영양소·페이지 샘플 확대`
+    )
+    fetchResult = await fetchRelaxedRecommendationCandidates(
+      getAllRecommendationBuckets()
     )
   }
 
-  return runEngine(req, candidates, relaxed)
+  if (fetchResult.stats.afterHardFilterCount < RELAXED_CANDIDATE_THRESHOLD) {
+    relaxed = true
+    relaxationNotes.push("키워드·페이지·영양소 쿼리를 최대치로 재시도")
+    fetchResult = await fetchRecommendationCandidatesWide(
+      getAllRecommendationBuckets(),
+      {
+        limitPerBucket: 1000,
+        includeNutrientQueries: true,
+        includePaginated: true,
+      }
+    )
+  }
+
+  return runEngine(
+    req,
+    fetchResult.candidates,
+    fetchResult.stats,
+    relaxed,
+    relaxationNotes
+  )
 }
 
 export function generateFoodRecommendationsFromCandidates(
   req: RecommendFoodsRequest,
   candidates: FoodCandidate[]
 ): RecommendFoodsResponse {
-  return runEngine(req, candidates, false)
+  const mockStats: CandidateFetchStats = {
+    totalFoodItems: candidates.length,
+    baseCandidateCount: candidates.length,
+    afterHardFilterCount: candidates.length,
+    appliedFilters: ["mock"],
+    fetchMethods: ["mock"],
+  }
+  return runEngine(req, candidates, mockStats, false)
 }
