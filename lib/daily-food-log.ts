@@ -29,6 +29,7 @@ export interface LoggedFoodEntry {
   mealSlotId?: MealSlotId
   nutrition: LoggedNutrition
   appliedAt: string
+  recommendationContext?: import("@/lib/recommendation-meal-targets").MealRecommendationContext
 }
 
 export interface DailyFoodLog {
@@ -220,6 +221,38 @@ export function replaceMealSlotFoodLogEntries(
   return next
 }
 
+/** 이전 추천 식단 기록을 제거한 뒤 새 추천 식단을 적용합니다. */
+export function replaceRecommendedMealEntries(
+  entries: Omit<LoggedFoodEntry, "id" | "appliedAt">[],
+  now = new Date()
+): DailyFoodLog {
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const current = all[date] ?? loadTodayFoodLog(now)
+  const appliedAt = now.toISOString()
+  const kept = current.entries.filter(
+    (e) => !e.recommendationContext?.isRecommendedMeal
+  )
+
+  const next: DailyFoodLog = {
+    ...current,
+    date,
+    entries: [
+      ...entries.map((entry) => ({
+        ...entry,
+        id: generateId(),
+        appliedAt,
+      })),
+      ...kept,
+    ],
+    updatedAt: appliedAt,
+  }
+
+  all[date] = next
+  writeAll(all)
+  return next
+}
+
 export function addFoodLogEntries(
   entries: Omit<LoggedFoodEntry, "id" | "appliedAt">[],
   now = new Date()
@@ -260,6 +293,33 @@ export function removeFoodLogEntry(id: string, now = new Date()): DailyFoodLog {
   const next: DailyFoodLog = {
     ...current,
     entries: current.entries.filter((e) => e.id !== id),
+    updatedAt: now.toISOString(),
+  }
+
+  all[date] = next
+  writeAll(all)
+  return next
+}
+
+/** 추천 식단이면 같은 comboId 항목을 함께 제거합니다. */
+export function removeFoodLogEntryOrCombo(
+  entryId: string,
+  now = new Date()
+): DailyFoodLog {
+  const date = getTodayDateKey(now)
+  const all = readAll()
+  const current = all[date] ?? loadTodayFoodLog(now)
+  const entry = current.entries.find((e) => e.id === entryId)
+  if (!entry) return current
+
+  const comboId = entry.recommendationContext?.comboId
+  const next: DailyFoodLog = {
+    ...current,
+    entries: current.entries.filter((e) => {
+      if (e.id === entryId) return false
+      if (comboId && e.recommendationContext?.comboId === comboId) return false
+      return true
+    }),
     updatedAt: now.toISOString(),
   }
 

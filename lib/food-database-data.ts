@@ -12,6 +12,7 @@ type N = {
 type FoodItem = {
   id: string
   name: string
+  nameEn?: string
   category: string
   aliases?: string[]
   pieceWeightG?: number
@@ -29,11 +30,13 @@ function f(
   servingLabel: string,
   per100g: N,
   aliases?: string[],
-  refinedCarbLevel?: "low" | "medium" | "high"
+  refinedCarbLevel?: "low" | "medium" | "high",
+  nameEn?: string
 ): FoodItem {
   return {
     id,
     name,
+    nameEn,
     category,
     pieceWeightG,
     servingGrams: pieceWeightG,
@@ -45,6 +48,9 @@ function f(
 }
 
 /** 검색 가능한 음식 DB — 100g 기준 영양성분 (대략값) */
+import { FOOD_DATABASE_KOREAN_EXT } from "@/lib/food-database-korean-ext"
+import { FOOD_SEARCH_BASE_ITEMS } from "@/lib/food-database-search-bases"
+
 export const FOOD_DATABASE_ITEMS: FoodItem[] = [
   // ── 곡물 · 밥 ──
   f("rice-white", "백미밥", "곡물", 210, "1공기", { calories: 130, carbsG: 28, proteinG: 2.5, fatG: 0.3, sodiumMg: 1 }, ["흰밥", "쌀밥"], "high"),
@@ -74,11 +80,11 @@ export const FOOD_DATABASE_ITEMS: FoodItem[] = [
   f("baguette", "바게트", "탄수", 50, "1조각", { calories: 274, carbsG: 56, proteinG: 9, fatG: 1.5, sodiumMg: 540 }),
   f("croissant", "크로아상", "탄수", 60, "1개", { calories: 406, carbsG: 45, proteinG: 8, fatG: 21, sodiumMg: 380 }),
   f("rice-cake", "떡", "탄수", 80, "1조각", { calories: 235, carbsG: 52, proteinG: 3, fatG: 0.5, sodiumMg: 5 }, undefined, "high"),
-  f("pasta", "스파게티(삶은)", "탄수", 200, "1인분", { calories: 131, carbsG: 25, proteinG: 5, fatG: 1.1, sodiumMg: 1 }, undefined, "high"),
+  f("pasta", "스파게티(삶은)", "탄수", 200, "1인분", { calories: 131, carbsG: 25, proteinG: 5, fatG: 1.1, sodiumMg: 1 }, ["파스타", "pasta"], "high", "pasta"),
   f("udon", "우동(삶은)", "탄수", 250, "1인분", { calories: 105, carbsG: 22, proteinG: 3, fatG: 0.5, sodiumMg: 10 }, undefined, "high"),
   f("soba", "메밀국수(삶은)", "탄수", 200, "1인분", { calories: 99, carbsG: 21, proteinG: 4, fatG: 0.2, sodiumMg: 5 }),
-  f("ramen", "라면(조리)", "탄수", 500, "1봉", { calories: 88, carbsG: 12, proteinG: 2, fatG: 3.5, sodiumMg: 400 }),
-  f("instant-noodle", "컵라면", "탄수", 120, "1개", { calories: 450, carbsG: 60, proteinG: 8, fatG: 18, sodiumMg: 1600 }),
+  f("ramen", "라면", "탄수", 500, "1봉", { calories: 88, carbsG: 12, proteinG: 2, fatG: 3.5, sodiumMg: 400 }, ["라면(조리)", "치즈라면", "계란라면", "매운라면"], "high", "ramen"),
+  f("instant-noodle", "컵라면", "탄수", 120, "1개", { calories: 450, carbsG: 60, proteinG: 8, fatG: 18, sodiumMg: 1600 }, ["라면", "치즈라면", "계란라면", "매운라면"], "high", "instant noodle"),
   f("rice-noodle", "쌀국수(삶은)", "탄수", 200, "1인분", { calories: 109, carbsG: 25, proteinG: 1.8, fatG: 0.2, sodiumMg: 5 }),
   f("glass-noodle", "당면(삶은)", "탄수", 100, "1인분", { calories: 351, carbsG: 86, proteinG: 0.1, fatG: 0.1, sodiumMg: 10 }, ["당면"]),
   f("shirataki", "곤약밥", "탄수", 150, "1공기", { calories: 10, carbsG: 2, proteinG: 0, fatG: 0, sodiumMg: 5 }),
@@ -195,9 +201,9 @@ export const FOOD_DATABASE_ITEMS: FoodItem[] = [
   // ── 반찬 · 국 ──
   f("kimchi", "배추김치", "반찬", 50, "1접시", { calories: 15, carbsG: 2.4, proteinG: 1.1, fatG: 0.5, sodiumMg: 600, fiberG: 1.8 }),
   f("radish-kimchi", "깍두기", "반찬", 50, "1접시", { calories: 18, carbsG: 3.5, proteinG: 0.8, fatG: 0.2, sodiumMg: 550 }),
-  f("doenjang-soup", "된장찌개", "반찬", 250, "1그릇", { calories: 45, carbsG: 4, proteinG: 3, fatG: 2, sodiumMg: 800 }),
-  f("kimchi-jjigae", "김치찌개", "반찬", 300, "1그릇", { calories: 55, carbsG: 5, proteinG: 4, fatG: 2.5, sodiumMg: 900 }),
-  f("miyeok-guk", "미역국", "반찬", 300, "1그릇", { calories: 35, carbsG: 3, proteinG: 3, fatG: 1.5, sodiumMg: 700 }),
+  f("doenjang-soup", "된장찌개", "반찬", 250, "1그릇", { calories: 45, carbsG: 4, proteinG: 3, fatG: 2, sodiumMg: 800 }, ["차돌된장찌개", "우렁된장찌개", "된장 찌개"]),
+  f("kimchi-jjigae", "김치찌개", "반찬", 300, "1그릇", { calories: 55, carbsG: 5, proteinG: 4, fatG: 2.5, sodiumMg: 900 }, ["참치김치찌개", "돼지고기김치찌개", "꽁치김치찌개", "김치 찌개"]),
+  f("miyeok-guk", "미역국", "반찬", 300, "1그릇", { calories: 35, carbsG: 3, proteinG: 3, fatG: 1.5, sodiumMg: 700 }, ["소고기미역국", "조개미역국", "미역 국"]),
   f("seaweed-soup", "시래기국", "반찬", 300, "1그릇", { calories: 30, carbsG: 4, proteinG: 2, fatG: 1, sodiumMg: 650 }),
   f("steamed-egg", "계란찜", "반찬", 150, "1인분", { calories: 120, carbsG: 2, proteinG: 10, fatG: 8, sodiumMg: 200 }),
   f("spinach-side", "시금치나물", "반찬", 80, "1접시", { calories: 35, carbsG: 4, proteinG: 2.5, fatG: 1.5, sodiumMg: 300 }),
@@ -261,4 +267,7 @@ export const FOOD_DATABASE_ITEMS: FoodItem[] = [
   f("energy-drink", "에너지음료", "음료", 250, "1캔", { calories: 45, carbsG: 11, proteinG: 0, fatG: 0, sodiumMg: 80, sugarG: 11 }),
   f("beer", "맥주", "음료", 500, "1잔", { calories: 43, carbsG: 3.6, proteinG: 0.5, fatG: 0, sodiumMg: 4 }),
   f("soju", "소주", "음료", 50, "1잔", { calories: 130, carbsG: 0, proteinG: 0, fatG: 0, sodiumMg: 1 }),
+
+  ...FOOD_SEARCH_BASE_ITEMS,
+  ...FOOD_DATABASE_KOREAN_EXT,
 ]

@@ -25,10 +25,12 @@ import {
 import {
   calculateDailyMacroTargets,
   formatCalories,
+  DEFAULT_USER_PROFILE,
   loadUserProfile,
   type MacroTargets,
 } from "@/lib/user-profile"
 import { getTodayScheduleDay, type WeeklyScheduleDay } from "@/lib/weekly-schedule"
+import { useHydrated } from "@/hooks/use-hydrated"
 import {
   COACHING_DIET_MODE_OPTIONS,
   type DietCoachingMode,
@@ -66,6 +68,9 @@ export type RecommendedMenuItemSelectContext = {
   itemIndex: number
   mealLabel: string
   servingCount: number
+  /** API 추천 조합 — 오늘 식단에 직접 추가 */
+  source?: "api" | "legacy"
+  combo?: import("@/lib/food-recommendation-types").RecommendFoodCombo
 }
 
 export type RecommendedMealMenuPanelHandle = {
@@ -77,10 +82,27 @@ export type RecommendedMealMenuPanelHandle = {
   ) => void
 }
 import {
-  mealToFoodLogEntries,
+  fetchFoodRecommendations,
+  loadRecentRecommendationIds,
+  loadRecentRecommendedFoodIds,
+  loadStrategySettings,
+  recommendItemToFoodDatabaseItem,
+  saveRecentRecommendationIds,
+  saveRecentRecommendedFoodIds,
+  saveStrategySettings,
+} from "@/lib/food-recommendation-client"
+import type { RecommendFoodCombo, RecommendFoodsResponse } from "@/lib/food-recommendation-types"
+import type { NutritionStrategySettings } from "@/lib/food-recommendation-strategy"
+import { mealTimingToContext } from "@/lib/food-recommendation-strategy"
+import { hasTrainingToday, trainingStatusToIntensity } from "@/lib/food-recommendation-strategy"
+import {
+  loadTodayFoodLog,
   replaceMealSlotFoodLogEntries,
+  mealToFoodLogEntries,
 } from "@/lib/daily-food-log"
-import { formatMacroG, nutritionPercent } from "@/lib/food-nutrition-utils"
+import { formatMacroG, nutritionPercent, sumLoggedNutrition } from "@/lib/food-nutrition-utils"
+import { NutritionRecommendationPanel } from "@/components/recommended-food-combos-view"
+import { saveExternalFoodFromSearchResult } from "@/lib/external-food-store"
 import { CollapsibleFoldPanel, CollapsibleInlineSection } from "@/components/collapsible-card"
 import { MacroRangeLabel } from "@/components/macro-range-label"
 import {
@@ -89,6 +111,14 @@ import {
   useCollapsibleOpen,
 } from "@/components/collapsible-section-context"
 import { cn } from "@/lib/utils"
+
+function inferDefaultMealSlot(): FoodMealSlotId {
+  const hour = new Date().getHours()
+  if (hour >= 5 && hour < 10) return "breakfast"
+  if (hour >= 10 && hour < 15) return "lunch"
+  if (hour >= 17 && hour < 22) return "dinner"
+  return "snack"
+}
 
 function formatSavedItemsSummary(items: SavedMealMenuItem[]): string {
   if (items.length === 0) return "항목 없음"
@@ -866,6 +896,10 @@ type MealSlotCompositionUndoSnapshot = {
   slotRefreshCount?: number
 }
 
+type AllMealsCompositionUndoSnapshot = Partial<
+  Record<FoodMealSlotId, MealSlotCompositionUndoSnapshot>
+>
+
 function pickSlotRecord<T extends Record<string, unknown>>(
   record: T,
   slotId: FoodMealSlotId
@@ -958,6 +992,58 @@ function MealSlotActionButtons({
         )}
       >
         영양관리에 반영
+      </button>
+    </div>
+  )
+}
+
+function AllMealsActionButtons({
+  undoAvailable = false,
+  canClear,
+  canApply,
+  onClearOrUndo,
+  onApplyAll,
+}: {
+  undoAvailable?: boolean
+  canClear: boolean
+  canApply: boolean
+  onClearOrUndo: () => void
+  onApplyAll: () => void
+}) {
+  return (
+    <div className="flex gap-2">
+      <button
+        type="button"
+        disabled={!undoAvailable && !canClear}
+        onClick={onClearOrUndo}
+        className={cn(
+          "flex-1 h-9 rounded-lg text-[11px] font-semibold transition-colors inline-flex items-center justify-center gap-1",
+          undoAvailable
+            ? "border border-accent/35 bg-accent/10 text-accent hover:bg-accent/20"
+            : "border border-border/60 bg-background/30 text-muted-foreground hover:text-destructive hover:border-destructive/40 hover:bg-destructive/5",
+          "disabled:opacity-40 disabled:pointer-events-none"
+        )}
+      >
+        {undoAvailable ? (
+          <>
+            <Undo2 className="h-3.5 w-3.5" />
+            되돌리기
+          </>
+        ) : (
+          "모두 비우기"
+        )}
+      </button>
+      <button
+        type="button"
+        disabled={!canApply}
+        onClick={onApplyAll}
+        className={cn(
+          "flex-1 h-9 rounded-lg text-[11px] font-semibold transition-colors",
+          "border border-accent/35 bg-accent/10 text-accent",
+          "hover:bg-accent/20 disabled:opacity-40 disabled:pointer-events-none"
+        )}
+      >
+        영양 관리에 모두 반영
       </button>
     </div>
   )
@@ -1405,10 +1491,24 @@ export const RecommendedMealMenuPanel = forwardRef<
       food: FoodDatabaseItem,
       context: RecommendedMenuItemSelectContext
     ) => void
+    onApplyCombo?: (combo: RecommendFoodCombo) => void
     className?: string
   }
->(function RecommendedMealMenuPanel({ targets, onSelectFood, className }, ref) {
+>(function RecommendedMealMenuPanel({ targets, onSelectFood, onApplyCombo, className }, ref) {
+  const hydrated = useHydrated()
+  const [recommendationMode, setRecommendationMode] = useState<"api" | "legacy">(
+    "api"
+  )
+  const [apiResponse, setApiResponse] = useState<RecommendFoodsResponse | null>(
+    null
+  )
+  const [apiLoading, setApiLoading] = useState(false)
+  const [apiError, setApiError] = useState<string | null>(null)
+  const [variantSeed, setVariantSeed] = useState(0)
   const [requested, setRequested] = useState(false)
+  const [strategySettings, setStrategySettings] = useState<NutritionStrategySettings>(
+    () => loadStrategySettings()
+  )
   const [variantIndex, setVariantIndex] = useState(0)
   const [itemRefreshCounts, setItemRefreshCounts] = useState<Record<string, number>>({})
   const [itemSlotOverrides, setItemSlotOverrides] = useState<
@@ -1426,6 +1526,8 @@ export const RecommendedMealMenuPanel = forwardRef<
   const [slotUndoSnapshots, setSlotUndoSnapshots] = useState<
     Partial<Record<FoodMealSlotId, MealSlotCompositionUndoSnapshot>>
   >({})
+  const [allMealsUndoSnapshot, setAllMealsUndoSnapshot] =
+    useState<AllMealsCompositionUndoSnapshot | null>(null)
   const [savedListVersion, setSavedListVersion] = useState(0)
   const [menuLoadRevision, setMenuLoadRevision] = useState(0)
   const [slotLoadRevisions, setSlotLoadRevisions] = useState<
@@ -1434,8 +1536,14 @@ export const RecommendedMealMenuPanel = forwardRef<
   const [dailySaveOpen, setDailySaveOpen] = useState(false)
   const [scope, setScope] = useState<"daily" | "perMeal">("daily")
   const [panelOpen, setPanelOpen] = useCollapsibleOpen("recommended-meal-menu", true)
-  const profile = useMemo(() => loadUserProfile(), [requested, variantIndex])
-  const actualSchedule = useMemo(() => getTodayScheduleDay(), [])
+  const profile = useMemo(
+    () => (hydrated ? loadUserProfile() : { ...DEFAULT_USER_PROFILE }),
+    [hydrated, requested, variantIndex]
+  )
+  const actualSchedule = useMemo(
+    (): WeeklyScheduleDay | null => (hydrated ? getTodayScheduleDay() : null),
+    [hydrated]
+  )
   const [reflectTraining, setReflectTraining] = useState(true)
   const effectiveSchedule = useMemo(
     () => (reflectTraining ? actualSchedule : null),
@@ -1452,17 +1560,135 @@ export const RecommendedMealMenuPanel = forwardRef<
     : targets.breakdown.coachingMode ?? null
 
   useEffect(() => {
+    if (!hydrated) return
+    setStrategySettings(loadStrategySettings())
+  }, [hydrated])
+
+  const handleStrategyChange = useCallback(
+    (patch: Partial<NutritionStrategySettings>) => {
+      setStrategySettings((prev) => {
+        const next = { ...prev, ...patch }
+        saveStrategySettings(next)
+        return next
+      })
+    },
+    []
+  )
+
+  const fetchSmartRecommendations = useCallback(
+    async (seed = variantSeed) => {
+      setApiLoading(true)
+      setApiError(null)
+      const consumed = hydrated
+        ? sumLoggedNutrition(loadTodayFoodLog().entries)
+        : sumLoggedNutrition([])
+
+      const { data, message } = await fetchFoodRecommendations({
+        targets: {
+          calories: targets.calories,
+          proteinG: targets.proteinG,
+          carbsG: targets.carbsG,
+          fatG: targets.fatG,
+          fiberG: targets.fiberG,
+          sodiumMg: targets.sodiumMg,
+          sugarG: targets.sugarG,
+        },
+        consumed,
+        goal: strategySettings.goal,
+        trainingStatus: strategySettings.trainingStatus,
+        mealTiming: strategySettings.mealTiming,
+        intensity: strategySettings.intensity,
+        mealContext: mealTimingToContext(strategySettings.mealTiming),
+        hasTrainingToday: hasTrainingToday(strategySettings.trainingStatus),
+        trainingIntensity: trainingStatusToIntensity(strategySettings.trainingStatus),
+        recentFoodIds: loadRecentRecommendedFoodIds(),
+        recentRecommendationIds: loadRecentRecommendationIds(),
+        variantSeed: seed,
+      })
+
+      setApiLoading(false)
+      if (data?.recommendations.length) {
+        setApiResponse(data)
+        setApiError(null)
+        saveRecentRecommendationIds(data.recommendations.map((r) => r.id))
+        saveRecentRecommendedFoodIds(
+          data.recommendations.flatMap((r) => r.items.map((i) => i.id))
+        )
+      } else {
+        setApiResponse(data)
+        setApiError(
+          message ??
+            "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요."
+        )
+      }
+    },
+    [
+      variantSeed,
+      hydrated,
+      targets,
+      strategySettings,
+    ]
+  )
+
+  const handleRequestSmartRecommendations = useCallback(() => {
+    setRecommendationMode("api")
+    setRequested(true)
+    setVariantSeed(0)
+    void fetchSmartRecommendations(0)
+  }, [fetchSmartRecommendations])
+
+  const handleRefreshSmartRecommendations = useCallback(() => {
+    const next = variantSeed + 1
+    setVariantSeed(next)
+    void fetchSmartRecommendations(next)
+  }, [variantSeed, fetchSmartRecommendations])
+
+  const handleSelectRecommendItem = useCallback(
+    (
+      item: RecommendFoodsResponse["recommendations"][number]["items"][number],
+      combo: RecommendFoodsResponse["recommendations"][number]
+    ) => {
+      const food = recommendItemToFoodDatabaseItem(item)
+      saveExternalFoodFromSearchResult({
+        id: item.id,
+        name: item.nameKo,
+        category: item.category,
+        per100g: food.per100g,
+        source: "official",
+        isEstimated: false,
+        pieceWeightG: item.amountG,
+        servingLabel: "1회",
+      })
+      onSelectFood?.(food, {
+        slotId: combo.applyMealSlotId,
+        itemIndex: 0,
+        mealLabel: combo.recommendedSlotLabel,
+        servingCount: 1,
+        source: "api",
+        combo,
+      })
+    },
+    [onSelectFood]
+  )
+
+  useEffect(() => {
+    if (!hydrated) return
     const handler = () => setSavedListVersion((version) => version + 1)
     window.addEventListener(SAVED_MEAL_MENU_EVENT, handler)
     return () => window.removeEventListener(SAVED_MEAL_MENU_EVENT, handler)
-  }, [])
+  }, [hydrated])
 
   const savedDailyMenus = useMemo(
-    () => listSavedDailyMealMenus(),
-    [savedListVersion]
+    () => (hydrated ? listSavedDailyMealMenus() : []),
+    [hydrated, savedListVersion]
   )
 
   const savedSlotsByMeal = useMemo(() => {
+    if (!hydrated) {
+      return Object.fromEntries(
+        FOOD_MEAL_SLOT_IDS.map((slotId) => [slotId, []])
+      ) as Record<FoodMealSlotId, SavedMealSlotRecord[]>
+    }
     const all = listSavedMealSlots()
     return Object.fromEntries(
       FOOD_MEAL_SLOT_IDS.map((slotId) => [
@@ -1470,7 +1696,7 @@ export const RecommendedMealMenuPanel = forwardRef<
         all.filter((item) => item.slotId === slotId),
       ])
     ) as Record<FoodMealSlotId, SavedMealSlotRecord[]>
-  }, [savedListVersion])
+  }, [hydrated, savedListVersion])
 
   const menuTargets = useMemo(() => {
     if (!isLossGoal) {
@@ -1478,10 +1704,10 @@ export const RecommendedMealMenuPanel = forwardRef<
     }
     const dietMode = coachingMode === "fast_loss" ? "fast_loss" : "normal_loss"
     return calculateDailyMacroTargets(
-      { ...loadUserProfile(), dietMode, goalType: "loss" },
+      { ...profile, dietMode, goalType: "loss" },
       effectiveSchedule
     )
-  }, [targets, coachingMode, isLossGoal, effectiveSchedule, profile])
+  }, [coachingMode, isLossGoal, effectiveSchedule, profile])
 
   const plan = useMemo(() => {
     if (!requested) return null
@@ -1809,6 +2035,7 @@ export const RecommendedMealMenuPanel = forwardRef<
     setSlotFrozenSpecs({})
     setSlotRefreshCounts({})
     setSlotUndoSnapshots({})
+    setAllMealsUndoSnapshot(null)
   }
 
   const clearSlotUndoSnapshot = useCallback((slotId: FoodMealSlotId) => {
@@ -1823,6 +2050,7 @@ export const RecommendedMealMenuPanel = forwardRef<
   const invalidateMealEdits = useCallback(
     (slotId: FoodMealSlotId) => {
       clearSlotUndoSnapshot(slotId)
+      setAllMealsUndoSnapshot(null)
     },
     [clearSlotUndoSnapshot]
   )
@@ -1935,6 +2163,8 @@ export const RecommendedMealMenuPanel = forwardRef<
     }
     setSavedSlotSpecs(specs)
     resetItemCustomizations()
+    setRecommendationMode("legacy")
+    setApiResponse(null)
     setRequested(true)
     setSlotLoadRevisions((prev) => {
       const next = { ...prev }
@@ -1971,6 +2201,8 @@ export const RecommendedMealMenuPanel = forwardRef<
       },
     }))
     clearSlotCustomizations(record.slotId)
+    setRecommendationMode("legacy")
+    setApiResponse(null)
     setRequested(true)
     bumpMenuAfterLoad(record.slotId)
     toast.success(`「${record.name}」을 불러왔습니다`)
@@ -2014,6 +2246,76 @@ export const RecommendedMealMenuPanel = forwardRef<
     )
   }, [plan])
 
+  const handleClearOrUndoAllMealCompositions = useCallback(() => {
+    if (allMealsUndoSnapshot) {
+      for (const slotId of FOOD_MEAL_SLOT_IDS) {
+        const snapshot = allMealsUndoSnapshot[slotId]
+        if (snapshot) {
+          restoreMealSlotSnapshot(slotId, snapshot)
+        }
+      }
+      setAllMealsUndoSnapshot(null)
+      setSlotUndoSnapshots({})
+      toast.message("추천 메뉴를 모두 되돌렸습니다")
+      return
+    }
+
+    if (!plan) return
+    const mealsWithItems = plan.meals.filter((meal) => meal.items.length > 0)
+    if (mealsWithItems.length === 0) return
+
+    const snapshot: AllMealsCompositionUndoSnapshot = {}
+    for (const meal of mealsWithItems) {
+      snapshot[meal.slotId] = buildMealSlotUndoSnapshot(
+        meal.slotId,
+        savedSlotSpecs,
+        itemSlotOverrides,
+        itemRefreshCounts,
+        slotFrozenSpecs,
+        slotRefreshCounts
+      )
+    }
+
+    setAllMealsUndoSnapshot(snapshot)
+    setSlotUndoSnapshots({})
+
+    setSavedSlotSpecs((prev) => {
+      const next = { ...prev }
+      for (const meal of mealsWithItems) {
+        next[meal.slotId] = {
+          items: [],
+          title: "메뉴 없음",
+          lockServings: true,
+          loadToken: Date.now(),
+        }
+      }
+      return next
+    })
+
+    for (const meal of mealsWithItems) {
+      clearSlotCustomizations(meal.slotId)
+    }
+
+    setSlotLoadRevisions((prev) => {
+      const next = { ...prev }
+      for (const meal of mealsWithItems) {
+        next[meal.slotId] = (prev[meal.slotId] ?? 0) + 1
+      }
+      return next
+    })
+    bumpMenuAfterLoad()
+    toast.message("추천 메뉴를 모두 비웠습니다")
+  }, [
+    allMealsUndoSnapshot,
+    plan,
+    savedSlotSpecs,
+    itemSlotOverrides,
+    itemRefreshCounts,
+    slotFrozenSpecs,
+    slotRefreshCounts,
+    restoreMealSlotSnapshot,
+  ])
+
   const handleClearOrUndoMealComposition = useCallback(
     (meal: DailyMealMenuPlan["meals"][number]) => {
       const slotId = meal.slotId
@@ -2022,12 +2324,14 @@ export const RecommendedMealMenuPanel = forwardRef<
       if (undo) {
         restoreMealSlotSnapshot(slotId, undo)
         clearSlotUndoSnapshot(slotId)
+        setAllMealsUndoSnapshot(null)
         toast.message(`「${meal.label}」 메뉴를 되돌렸습니다`)
         return
       }
 
       if (meal.items.length === 0) return
 
+      setAllMealsUndoSnapshot(null)
       setSlotUndoSnapshots((prev) => ({
         ...prev,
         [slotId]: buildMealSlotUndoSnapshot(
@@ -2101,35 +2405,21 @@ export const RecommendedMealMenuPanel = forwardRef<
     return `메뉴 ${y}.${m}.${d} ${h}:${min}`
   }, [dailySaveOpen])
 
-  if (!requested) {
+  if (recommendationMode === "api") {
     return (
-      <div
-        className={cn(
-          "rounded-xl border border-dashed border-accent/30 bg-accent/5 px-3 py-3",
-          className
-        )}
-      >
-        <div className="flex items-start gap-2.5">
-          <div className="h-9 w-9 rounded-lg bg-accent/15 flex items-center justify-center shrink-0">
-            <UtensilsCrossed className="h-4 w-4 text-accent" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-[12px] font-semibold text-accent">오늘의 추천 메뉴</p>
-            <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
-              목표(유지·감량 등)와 오늘 훈련량에 맞는 현실적인 식단을 제안해 드려요.
-            </p>
-            <Button
-              type="button"
-              size="sm"
-              className="mt-2.5 h-9 bg-accent text-accent-foreground hover:bg-accent/90"
-              onClick={() => setRequested(true)}
-            >
-              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-              추천 메뉴 받기
-            </Button>
-          </div>
-        </div>
-      </div>
+      <NutritionRecommendationPanel
+        className={className}
+        settings={strategySettings}
+        onSettingsChange={handleStrategyChange}
+        loading={apiLoading}
+        error={apiError}
+        response={apiResponse}
+        hasRequested={requested}
+        onRequest={handleRequestSmartRecommendations}
+        onRefresh={handleRefreshSmartRecommendations}
+        onSelectItem={onSelectFood ? handleSelectRecommendItem : undefined}
+        onApplyCombo={onApplyCombo}
+      />
     )
   }
 
@@ -2339,18 +2629,13 @@ export const RecommendedMealMenuPanel = forwardRef<
                 </CollapsibleInlineSection>
               )}
 
-              <button
-                type="button"
-                onClick={handleApplyAllMealsToNutrition}
-                disabled={!plan?.meals.some((meal) => meal.items.length > 0)}
-                className={cn(
-                  "w-full h-9 rounded-lg text-[11px] font-semibold transition-colors",
-                  "border border-accent/35 bg-accent/10 text-accent hover:bg-accent/20",
-                  "disabled:opacity-40 disabled:pointer-events-none"
-                )}
-              >
-                영양 관리에 모두 반영
-              </button>
+              <AllMealsActionButtons
+                undoAvailable={Boolean(allMealsUndoSnapshot)}
+                canClear={Boolean(plan?.meals.some((meal) => meal.items.length > 0))}
+                canApply={Boolean(plan?.meals.some((meal) => meal.items.length > 0))}
+                onClearOrUndo={handleClearOrUndoAllMealCompositions}
+                onApplyAll={handleApplyAllMealsToNutrition}
+              />
             </div>
           </CollapsibleContent>
         </div>

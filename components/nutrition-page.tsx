@@ -56,7 +56,10 @@ export function NutritionPage() {
     () => (hydrated ? getNutritionProfile() : getDefaultNutritionProfile()),
     [hydrated, profileVersion]
   )
-  const todaySchedule = useMemo(() => getTodayScheduleDay(), [])
+  const todaySchedule = useMemo(
+    (): WeeklyScheduleDay | null => (hydrated ? getTodayScheduleDay() : null),
+    [hydrated]
+  )
   const targets = useMemo(
     () =>
       hydrated
@@ -119,9 +122,15 @@ export function NutritionPage() {
           <div className="min-w-0">
             <h1 className="text-2xl font-bold tracking-tight">영양·체중관리</h1>
             <p className="text-sm text-muted-foreground">
-              {formatKoreanDateWithWeekday()}
-              {todaySchedule && (
-                <span className="ml-1.5">· 오늘 {todaySchedule.type}</span>
+              {hydrated ? (
+                <>
+                  {formatKoreanDateWithWeekday()}
+                  {todaySchedule ? (
+                    <span className="ml-1.5">· 오늘 {todaySchedule.type}</span>
+                  ) : null}
+                </>
+              ) : (
+                <span aria-hidden="true">&nbsp;</span>
               )}
             </p>
           </div>

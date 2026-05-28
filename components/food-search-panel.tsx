@@ -3,6 +3,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Loader2, Minus, PenLine, Plus, Search, ShoppingCart, X } from "lucide-react"
 import { toast } from "sonner"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { NutritionDailySummary } from "@/components/nutrition-daily-summary"
 import {
@@ -28,7 +38,7 @@ import {
 } from "@/components/recommended-meal-menu-panel"
 import { CollapsibleInlineSection } from "@/components/collapsible-card"
 import {
-  searchFoodDatabase,
+  searchFoodDatabaseDetailed,
   formatFullFoodPortion,
   formatPortionAmount,
   getFoodById,
@@ -47,6 +57,20 @@ import {
   type CustomFoodItem,
 } from "@/lib/custom-food-store"
 import {
+  EXTERNAL_FOOD_EVENT,
+  isExternalFood,
+} from "@/lib/external-food-store"
+import type { RecommendFoodCombo } from "@/lib/food-recommendation-types"
+import {
+  recommendItemToFoodDatabaseItem,
+} from "@/lib/food-recommendation-client"
+import { saveExternalFoodFromSearchResult } from "@/lib/external-food-store"
+import type { ExternalFoodSearchResult } from "@/lib/external-food-types"
+import {
+  cacheAndSaveExternalFood,
+  fetchExternalFoodSearch,
+} from "@/lib/external-food-client"
+import {
   FOOD_NUTRITION_OVERRIDE_EVENT,
   isNutritionOverrideEditable,
 } from "@/lib/food-nutrition-overrides"
@@ -59,17 +83,28 @@ import {
 } from "@/lib/food-portion-calculator"
 import {
   addFoodLogEntries,
+  adjustFoodLogServingCount,
   clearMealSlotFoodLogEntries,
   clearTodayFoodLog,
   DAILY_FOOD_LOG_EVENT,
   loadTodayFoodLog,
   refreshTodayFoodLogNutrition,
+  removeFoodLogEntry,
+  replaceRecommendedMealEntries,
   restoreTodayFoodLog,
+  updateFoodLogMealSlot,
   type LoggedFoodEntry,
   type DailyFoodLog,
 } from "@/lib/daily-food-log"
 import { DAILY_DATE_CHANGED_EVENT } from "@/lib/daily-date"
 import { MEAL_SLOTS, type MealSlotId } from "@/lib/nutrition"
+import {
+  buildRecommendationContext,
+  isMealSlotMismatch,
+  labelForIntendedMealSlot,
+  mismatchSuggestionMessage,
+  type MealRecommendationContext,
+} from "@/lib/recommendation-meal-targets"
 import type { FoodMealSlotId } from "@/lib/meal-slot-targets"
 import { formatCalories, type MacroTargets } from "@/lib/user-profile"
 import {
@@ -102,6 +137,18 @@ function createCartId(): string {
     return crypto.randomUUID()
   }
   return `cart-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+function inferDefaultMealSlot(): MealSlotId {
+  const hour = new Date().getHours()
+  if (hour >= 5 && hour < 10) return "breakfast"
+  if (hour >= 10 && hour < 15) return "lunch"
+  if (hour >= 17 && hour < 22) return "dinner"
+  return "snack"
+}
+
+function mealSlotLabel(id: MealSlotId): string {
+  return FOOD_MEAL_SLOTS.find((slot) => slot.id === id)?.label ?? "식사"
 }
 
 function adjustCartServing(
@@ -269,6 +316,7 @@ function FoodDetailDialog({
   onEditCustom,
   onEditNutritionOverride,
   recommendedMenuContext,
+  defaultMealSlot,
   onApplyToRecommendedMenu,
 }: {
   open: boolean
@@ -279,7 +327,11 @@ function FoodDetailDialog({
   onEditCustom?: () => void
   onEditNutritionOverride?: () => void
   recommendedMenuContext?: RecommendedMenuItemSelectContext | null
-  onApplyToRecommendedMenu?: (servingCount: number) => void
+  defaultMealSlot?: MealSlotId | null
+  onApplyToRecommendedMenu?: (params: {
+    servingCount: number
+    mealSlotId?: MealSlotId
+  }) => void
 }) {
   const [applyScope, setApplyScope] = useState<"meal" | "daily">("meal")
   const [mealSlot, setMealSlot] = useState<MealSlotId>("breakfast")
@@ -301,16 +353,27 @@ function FoodDetailDialog({
       setApplyScope("meal")
       if (recommendedMenuContext) {
         setServingCount(recommendedMenuContext.servingCount)
+        if (recommendedMenuContext.source === "api") {
+          setMealSlot(
+            (recommendedMenuContext.combo?.applyMealSlotId ??
+              recommendedMenuContext.slotId) as MealSlotId
+          )
+        }
       } else {
-        setMealSlot("breakfast")
+        setMealSlot(defaultMealSlot ?? inferDefaultMealSlot())
         setServingCount(1)
       }
     }
-  }, [open, food?.id, recommendedMenuContext])
+  }, [open, food?.id, recommendedMenuContext, defaultMealSlot])
 
   if (!food || !plan || !selected) return null
 
-  const isRecommendedMenuMode = Boolean(recommendedMenuContext && onApplyToRecommendedMenu)
+  const isApiRecommendationMode =
+    recommendedMenuContext?.source === "api" && Boolean(onApplyToRecommendedMenu)
+  const isLegacyRecommendedMenuMode =
+    Boolean(recommendedMenuContext && recommendedMenuContext.source !== "api") &&
+    Boolean(onApplyToRecommendedMenu)
+  const isRecommendedMenuMode = isApiRecommendationMode || isLegacyRecommendedMenuMode
   const portionUnitGrams = isRecommendedMenuMode
     ? (getPieceWeightG(food) ?? 100)
     : selected.grams
@@ -350,10 +413,19 @@ function FoodDetailDialog({
 
   const handleApplyToRecommendedMenu = () => {
     if (!onApplyToRecommendedMenu) return
-    onApplyToRecommendedMenu(servingCount)
-    toast.success(
-      `「${recommendedMenuContext?.mealLabel}」 메뉴에 ${food.name} ${servingCount}${servingUnit} 반영했습니다`
-    )
+    onApplyToRecommendedMenu({
+      servingCount,
+      mealSlotId: isApiRecommendationMode ? mealSlot : undefined,
+    })
+    if (isApiRecommendationMode) {
+      toast.success(
+        `「${food.name}」을 ${mealSlotLabel(mealSlot)} 식단에 적용했습니다`
+      )
+    } else {
+      toast.success(
+        `「${recommendedMenuContext?.mealLabel}」 메뉴에 ${food.name} ${servingCount}${servingUnit} 반영했습니다`
+      )
+    }
     onOpenChange(false)
   }
 
@@ -368,7 +440,10 @@ function FoodDetailDialog({
             <div className="min-w-0 flex-1">
               <DialogTitle className="text-base">{food.name}</DialogTitle>
               <p className="text-[12px] text-muted-foreground font-normal">
-                {isRecommendedMenuMode && recommendedMenuContext
+                {isApiRecommendationMode
+                  ? "추천 메뉴 · 끼니 선택 · 수량 조정"
+                  : null}
+                {isLegacyRecommendedMenuMode && recommendedMenuContext
                   ? `${recommendedMenuContext.mealLabel} 추천 메뉴 · 수량 조정`
                   : null}
                 {!isRecommendedMenuMode ? (
@@ -513,7 +588,7 @@ function FoodDetailDialog({
             </div>
           </div>
 
-          {!isRecommendedMenuMode ? (
+          {!isLegacyRecommendedMenuMode ? (
             <div className="space-y-1.5">
               <Label className="text-[11px] text-muted-foreground">어느 끼니에 넣을까요?</Label>
               <MealSlotPicker value={mealSlot} onChange={setMealSlot} />
@@ -537,7 +612,7 @@ function FoodDetailDialog({
               isRecommendedMenuMode ? handleApplyToRecommendedMenu : handleAddToCart
             }
           >
-            {isRecommendedMenuMode ? "메뉴에 반영" : "장바구니에 담기"}
+            {isRecommendedMenuMode ? (isApiRecommendationMode ? "오늘 식단에 적용" : "메뉴에 반영") : "장바구니에 담기"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -828,6 +903,7 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState<FoodDatabaseItem[]>([])
+  const [similarResults, setSimilarResults] = useState<FoodDatabaseItem[]>([])
   const [selectedFood, setSelectedFood] = useState<FoodDatabaseItem | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [foodLog, setFoodLog] = useState<DailyFoodLog>(EMPTY_FOOD_LOG)
@@ -836,6 +912,15 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
   const [editCustomFood, setEditCustomFood] = useState<CustomFoodItem | null>(null)
   const [customFormInitialName, setCustomFormInitialName] = useState("")
   const [customFoodVersion, setCustomFoodVersion] = useState(0)
+  const [externalFoodVersion, setExternalFoodVersion] = useState(0)
+  const [externalLoading, setExternalLoading] = useState(false)
+  const [externalResults, setExternalResults] = useState<ExternalFoodSearchResult[]>(
+    []
+  )
+  const [externalError, setExternalError] = useState<string | null>(null)
+  const [externalSelectingKey, setExternalSelectingKey] = useState<string | null>(
+    null
+  )
   const [nutritionOverrideVersion, setNutritionOverrideVersion] = useState(0)
   const [overrideFood, setOverrideFood] = useState<FoodDatabaseItem | null>(null)
   const [overrideDialogOpen, setOverrideDialogOpen] = useState(false)
@@ -843,12 +928,24 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
     useState<RecommendedMenuItemSelectContext | null>(null)
   const recommendedMenuRef = useRef<RecommendedMealMenuPanelHandle>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const externalSearchGenRef = useRef(0)
   const [slotUndoSnapshots, setSlotUndoSnapshots] = useState<
     Partial<Record<FoodMealSlotId, LoggedFoodEntry[]>>
   >({})
   const [clearAllUndoSnapshot, setClearAllUndoSnapshot] = useState<
     LoggedFoodEntry[] | null
   >(null)
+  const [pendingComboApply, setPendingComboApply] = useState<{
+    combo: RecommendFoodCombo
+    applySlot: FoodMealSlotId
+  } | null>(null)
+  const [logEntryDetail, setLogEntryDetail] = useState<LoggedFoodEntry | null>(
+    null
+  )
+  const [logEntryDetailOpen, setLogEntryDetailOpen] = useState(false)
+  const [inlineAddSlotId, setInlineAddSlotId] = useState<FoodMealSlotId | null>(
+    null
+  )
 
   useEffect(() => {
     setSlotUndoSnapshots((prev) => {
@@ -968,6 +1065,13 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
 
   useEffect(() => {
     if (!hydrated) return
+    const sync = () => setExternalFoodVersion((v) => v + 1)
+    window.addEventListener(EXTERNAL_FOOD_EVENT, sync)
+    return () => window.removeEventListener(EXTERNAL_FOOD_EVENT, sync)
+  }, [hydrated])
+
+  useEffect(() => {
+    if (!hydrated) return
     const sync = () => setNutritionOverrideVersion((v) => v + 1)
     window.addEventListener(FOOD_NUTRITION_OVERRIDE_EVENT, sync)
     return () => window.removeEventListener(FOOD_NUTRITION_OVERRIDE_EVENT, sync)
@@ -979,29 +1083,80 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
     if (refreshed) setSelectedFood(refreshed)
   }, [nutritionOverrideVersion, selectedFood?.id])
 
-  const runSearch = (q: string) => {
-    setLoading(true)
-    const warningContext = buildDietWarningContextFromTotals(
-      sumLoggedNutrition(foodLog.entries),
-      targets
-    )
-    const hits = searchFoodDatabase(q, 24, warningContext)
-    setResults(hits)
-    setLoading(false)
-  }
+  const runExternalSearch = useCallback(
+    async (q: string, fallbackQueries: string[] = []) => {
+      const gen = ++externalSearchGenRef.current
+      setExternalLoading(true)
+      setExternalError(null)
+      setExternalResults([])
+
+      const { results, displayMessage } = await fetchExternalFoodSearch(
+        q,
+        fallbackQueries
+      )
+
+      if (gen !== externalSearchGenRef.current) return
+
+      setExternalResults(results)
+      setExternalError(
+        results.length === 0 ? displayMessage ?? null : null
+      )
+      setExternalLoading(false)
+    },
+    []
+  )
+
+  const runSearch = useCallback(
+    (q: string) => {
+      setLoading(true)
+      setExternalLoading(false)
+      setExternalResults([])
+      setExternalError(null)
+      externalSearchGenRef.current += 1
+
+      const warningContext = buildDietWarningContextFromTotals(
+        sumLoggedNutrition(foodLog.entries),
+        targets
+      )
+      const { items, similarItems, fallbackExternalQueries } =
+        searchFoodDatabaseDetailed(q, 40, warningContext)
+      setResults(items)
+      setSimilarResults(similarItems)
+      setLoading(false)
+
+      const hasLocal = items.length > 0 || similarItems.length > 0
+      if (!hasLocal && q.length >= 2 && !isFiberSearchQuery(q)) {
+        void runExternalSearch(q, fallbackExternalQueries)
+      }
+    },
+    [foodLog.entries, targets, runExternalSearch]
+  )
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
     const q = query.trim()
     if (q.length < 1) {
       setResults([])
+      setSimilarResults([])
+      setExternalResults([])
+      setExternalError(null)
+      setExternalLoading(false)
+      externalSearchGenRef.current += 1
       return
     }
     debounceRef.current = setTimeout(() => runSearch(q), 200)
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [query, foodLog.entries, targets, customFoodVersion, nutritionOverrideVersion])
+  }, [
+    query,
+    foodLog.entries,
+    targets,
+    customFoodVersion,
+    externalFoodVersion,
+    nutritionOverrideVersion,
+    runSearch,
+  ])
 
   const openNutritionOverride = (foodId: string) => {
     const food = getFoodById(foodId)
@@ -1044,11 +1199,108 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
     runSearch(query.trim())
   }
 
+  const handleToggleInlineAdd = useCallback((slotId: FoodMealSlotId) => {
+    setInlineAddSlotId((prev) => (prev === slotId ? null : slotId))
+  }, [])
+
+  const handlePickFoodForSlot = useCallback(
+    (food: FoodDatabaseItem, slotId: FoodMealSlotId) => {
+      const pieceWeight = getPieceWeightG(food) ?? 100
+      const grams = gramsForServingCount(food, 1, pieceWeight)
+      const appliedNutrition = nutritionAtGrams(food, grams)
+
+      addFoodLogEntries([
+        {
+          foodId: food.id,
+          name: food.name,
+          grams,
+          displayAmount: formatFullFoodPortion(food, 1, pieceWeight),
+          servingCount: 1,
+          scope: "meal",
+          scopeLabel: mealSlotLabel(slotId),
+          mealSlotId: slotId,
+          nutrition: {
+            calories: appliedNutrition.calories,
+            carbsG: appliedNutrition.carbsG,
+            proteinG: appliedNutrition.proteinG,
+            fatG: appliedNutrition.fatG,
+            sodiumMg: appliedNutrition.sodiumMg,
+            sugarG: appliedNutrition.sugarG,
+            fiberG: appliedNutrition.fiberG,
+          },
+        },
+      ])
+      setFoodLog(loadTodayFoodLog())
+      toast.success(`「${food.name}」을 ${mealSlotLabel(slotId)}에 추가했습니다`)
+    },
+    []
+  )
+
+  const handleRemoveLogEntry = useCallback((entry: LoggedFoodEntry) => {
+    removeFoodLogEntry(entry.id)
+    setFoodLog(loadTodayFoodLog())
+    toast.message(`「${entry.name}」을 오늘 식단에서 제거했습니다`)
+  }, [])
+
   const openDetail = (food: FoodDatabaseItem) => {
     setRecommendedMenuEdit(null)
+    setLogEntryDetailOpen(false)
+    setLogEntryDetail(null)
     setSelectedFood(food)
     setDetailOpen(true)
   }
+
+  const openLogEntryDetail = useCallback((entry: LoggedFoodEntry) => {
+    setRecommendedMenuEdit(null)
+    setDetailOpen(false)
+    setSelectedFood(null)
+    setLogEntryDetail(entry)
+    setLogEntryDetailOpen(true)
+  }, [])
+
+  const logEntryDetailItem = useMemo((): FoodEntryDetailItem | null => {
+    if (!logEntryDetail) return null
+    const latest = foodLog.entries.find((e) => e.id === logEntryDetail.id)
+    if (!latest) return null
+    return {
+      id: latest.id,
+      foodId: latest.foodId,
+      name: latest.name,
+      displayAmount: latest.displayAmount,
+      servingCount: latest.servingCount,
+      grams: latest.grams,
+      mealSlotId: latest.mealSlotId,
+      nutrition: latest.nutrition,
+    }
+  }, [logEntryDetail, foodLog.entries])
+
+  useEffect(() => {
+    if (
+      logEntryDetailOpen &&
+      logEntryDetail &&
+      !foodLog.entries.some((e) => e.id === logEntryDetail.id)
+    ) {
+      setLogEntryDetailOpen(false)
+      setLogEntryDetail(null)
+    }
+  }, [foodLog.entries, logEntryDetail, logEntryDetailOpen])
+
+  const handleSelectExternalFood = useCallback(
+    async (item: ExternalFoodSearchResult) => {
+      const key = item.id ?? item.externalId ?? item.name
+      setExternalSelectingKey(key)
+      try {
+        const food = await cacheAndSaveExternalFood(item, query.trim())
+        setExternalFoodVersion((v) => v + 1)
+        openDetail(food)
+      } catch {
+        toast.error("음식 정보를 저장하지 못했어요")
+      } finally {
+        setExternalSelectingKey(null)
+      }
+    },
+    [query]
+  )
 
   const openRecommendedMenuItem = (
     food: FoodDatabaseItem,
@@ -1058,6 +1310,74 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
     setSelectedFood(food)
     setDetailOpen(true)
   }
+
+  const applyComboToFoodLog = useCallback(
+    (combo: RecommendFoodCombo, slot: FoodMealSlotId, allowMismatch = false) => {
+      const slotLabel = mealSlotLabel(slot)
+      const recContext = buildRecommendationContext(combo)
+      const mismatch = isMealSlotMismatch(combo, slot)
+
+      if (mismatch && !allowMismatch) {
+        setPendingComboApply({ combo, applySlot: slot })
+        return
+      }
+
+      const entryContext: MealRecommendationContext = {
+        ...recContext,
+        applyMealSlotId: slot,
+      }
+
+      replaceRecommendedMealEntries(
+        combo.items.map((item) => {
+          const food = recommendItemToFoodDatabaseItem(item)
+          saveExternalFoodFromSearchResult({
+            id: item.id,
+            name: item.nameKo,
+            category: item.category,
+            per100g: food.per100g,
+            source: "official",
+            isEstimated: false,
+            pieceWeightG: item.amountG,
+            servingLabel: "1회",
+          })
+          return {
+            foodId: food.id,
+            name: food.name,
+            grams: item.amountG,
+            displayAmount: formatFullFoodPortion(food, 1, item.amountG),
+            servingCount: 1,
+            scope: "meal" as const,
+            scopeLabel: `${combo.title} · ${slotLabel}`,
+            mealSlotId: slot,
+            recommendationContext: entryContext,
+            nutrition: {
+              calories: item.calories,
+              carbsG: item.carbs,
+              proteinG: item.protein,
+              fatG: item.fat,
+              sodiumMg: item.sodium,
+              sugarG: item.sugar,
+              fiberG: item.fiber,
+            },
+          }
+        })
+      )
+      setFoodLog(loadTodayFoodLog())
+      toast.success(
+        mismatch
+          ? `「${combo.title}」을 ${slotLabel}에 적용했습니다 (추천 목적과 다른 끼니)`
+          : `「${combo.title}」 ${combo.items.length}개 음식을 ${slotLabel} 식단에 적용했습니다`
+      )
+    },
+    []
+  )
+
+  const handleApplyRecommendCombo = useCallback(
+    (combo: RecommendFoodCombo) => {
+      applyComboToFoodLog(combo, combo.applyMealSlotId)
+    },
+    [applyComboToFoodLog]
+  )
 
   const handleAddToCart = (item: Omit<FoodCartItem, "cartId">) => {
     setCart((prev) => [{ ...item, cartId: createCartId() }, ...prev])
@@ -1081,6 +1401,19 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
   )
 
   const fiberSearch = isFiberSearchQuery(query)
+  const hasLocalResults = results.length > 0 || similarResults.length > 0
+  const showExternalSection =
+    Boolean(query.trim()) && !loading && !hasLocalResults && !fiberSearch
+  const apiResultsSectionTitle = useMemo(() => {
+    if (externalResults.length === 0) return "검색 결과"
+    const hasOfficial = externalResults.some((item) => item.source === "official")
+    const hasExternal = externalResults.some(
+      (item) => item.source === "cache" || item.source === "usda"
+    )
+    if (hasOfficial && !hasExternal) return "공식 음식 DB"
+    if (hasOfficial && hasExternal) return "검색 결과"
+    return "인터넷 검색 결과"
+  }, [externalResults])
 
   return (
     <div className="space-y-3">
@@ -1100,6 +1433,11 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
               onClick={() => {
                 setQuery("")
                 setResults([])
+                setSimilarResults([])
+                setExternalResults([])
+                setExternalError(null)
+                setExternalLoading(false)
+                externalSearchGenRef.current += 1
                 inputRef.current?.focus()
               }}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
@@ -1125,81 +1463,207 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
           ref={recommendedMenuRef}
           targets={targets}
           onSelectFood={openRecommendedMenuItem}
+          onApplyCombo={handleApplyRecommendCombo}
         />
       ) : null}
 
-      {loading && results.length === 0 && query.trim() ? (
+      {loading && !hasLocalResults && query.trim() ? (
         <p className="text-[12px] text-muted-foreground text-center py-3 flex items-center justify-center gap-2">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           검색 중…
         </p>
       ) : null}
 
-      {!loading && query.trim() && results.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border/60 px-3 py-4 text-center space-y-3">
-          <p className="text-[12px] text-muted-foreground">
-            「{query.trim()}」 검색 결과가 없습니다.
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            className="border-accent/30 text-accent hover:bg-accent/10"
-            onClick={() => openCreateCustomFood(query.trim())}
-          >
-            <Plus className="h-4 w-4 mr-1" />「{query.trim()}」직접 추가하기
-          </Button>
-          <p className="text-[10px] text-muted-foreground leading-relaxed">
-            영양성분표(100g 기준)를 입력해 저장하면 다음부터 검색·기록·수정·삭제가 가능해요.
-          </p>
+      {hasLocalResults ? (
+        <div className="space-y-3">
+          {results.length > 0 ? (
+            <div className="space-y-2">
+              <p className="text-[11px] font-semibold text-muted-foreground px-1">
+                정확한 결과
+              </p>
+              {fiberSearch ? (
+                <p className="text-[11px] text-accent/90 px-1 leading-relaxed">
+                  마트·편의점에서 쉽게 구할 수 있는 식이섬유 풍부 식품 순입니다.
+                </p>
+              ) : null}
+              <ul className="rounded-xl border border-border/50 divide-y divide-border/40 overflow-hidden max-h-[280px] overflow-y-auto">
+                {results.map((food) => (
+                  <li key={food.id}>
+                    <button
+                      type="button"
+                      onClick={() => openDetail(food)}
+                      className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-secondary/40 active:bg-secondary/60 transition-colors"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                          <p className="text-[13px] font-medium truncate">{food.name}</p>
+                          {isCustomFood(food) ? (
+                            <span className="shrink-0 rounded-full border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
+                              내 음식
+                            </span>
+                          ) : null}
+                          {isExternalFood(food) ? (
+                            <span className="shrink-0 rounded-full border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[9px] font-medium text-sky-700 dark:text-sky-300">
+                              저장됨
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground tabular-nums">
+                          {fiberSearch ? (
+                            <>
+                              1회 · 식이섬유{" "}
+                              {Math.round(
+                                getFiberPer100g(food) *
+                                  ((getPieceWeightG(food) ?? 100) / 100) *
+                                  10
+                              ) / 10}
+                              g · {food.per100g.calories}kcal · 100g당{" "}
+                              {getFiberPer100g(food)}g
+                            </>
+                          ) : (
+                            <>
+                              100g · {food.per100g.calories}kcal · 탄수{" "}
+                              {food.per100g.carbsG}g · 단백 {food.per100g.proteinG}g
+                            </>
+                          )}
+                        </p>
+                      </div>
+                      <span className="text-[11px] text-accent shrink-0">상세</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {similarResults.length > 0 ? (
+            <div className="space-y-2">
+              <p className="text-[11px] font-semibold text-muted-foreground px-1">
+                비슷한 음식
+              </p>
+              <ul className="rounded-xl border border-border/50 divide-y divide-border/40 overflow-hidden max-h-[240px] overflow-y-auto">
+                {similarResults.map((food) => (
+                  <li key={food.id}>
+                    <button
+                      type="button"
+                      onClick={() => openDetail(food)}
+                      className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-secondary/40 active:bg-secondary/60 transition-colors"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <p className="text-[13px] font-medium truncate">{food.name}</p>
+                          <span className="shrink-0 rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[9px] font-medium text-violet-700 dark:text-violet-300">
+                            추천
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          {food.category}
+                        </p>
+                      </div>
+                      <span className="text-[11px] text-accent shrink-0">선택</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
-      {results.length > 0 ? (
-        <>
-          {fiberSearch ? (
-            <p className="text-[11px] text-accent/90 px-1 leading-relaxed">
-              마트·편의점에서 쉽게 구할 수 있는 식이섬유 풍부 식품 순입니다.
+      {showExternalSection ? (
+        <div className="space-y-2">
+          {externalLoading ? (
+            <p className="text-[12px] text-muted-foreground text-center py-3 flex items-center justify-center gap-2">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              음식 정보를 검색 중...
             </p>
           ) : null}
-        <ul className="rounded-xl border border-border/50 divide-y divide-border/40 overflow-hidden max-h-[320px] overflow-y-auto">
-          {results.map((food) => (
-            <li key={food.id}>
-              <button
-                type="button"
-                onClick={() => openDetail(food)}
-                className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-secondary/40 active:bg-secondary/60 transition-colors"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <p className="text-[13px] font-medium truncate">{food.name}</p>
-                    {isCustomFood(food) ? (
-                      <span className="shrink-0 rounded-full border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
-                        내 음식
-                      </span>
-                    ) : null}
-                  </div>
-                  <p className="text-[11px] text-muted-foreground tabular-nums">
-                    {fiberSearch ? (
-                      <>
-                        1회 · 식이섬유{" "}
-                        {Math.round(getFiberPer100g(food) * ((getPieceWeightG(food) ?? 100) / 100) * 10) / 10}
-                        g · {food.per100g.calories}kcal
-                        · 100g당 {getFiberPer100g(food)}g
-                      </>
-                    ) : (
-                      <>
-                        100g · {food.per100g.calories}kcal · 탄수 {food.per100g.carbsG}g
-                        · 단백 {food.per100g.proteinG}g
-                      </>
-                    )}
-                  </p>
-                </div>
-                <span className="text-[11px] text-accent shrink-0">상세</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-        </>
+
+          {!externalLoading && externalResults.length > 0 ? (
+            <>
+              <p className="text-[11px] font-semibold text-muted-foreground px-1">
+                {apiResultsSectionTitle}
+              </p>
+              <ul className="rounded-xl border border-border/50 divide-y divide-border/40 overflow-hidden max-h-[280px] overflow-y-auto">
+                {externalResults.map((item) => {
+                  const key = item.id ?? item.externalId ?? item.name
+                  const selecting = externalSelectingKey === key
+                  return (
+                    <li key={key}>
+                      <button
+                        type="button"
+                        disabled={selecting}
+                        onClick={() => void handleSelectExternalFood(item)}
+                        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-secondary/40 active:bg-secondary/60 transition-colors disabled:opacity-60"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                            <p className="text-[13px] font-medium truncate">
+                              {item.name}
+                            </p>
+                            {item.source === "official" ? (
+                              <span className="shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:text-emerald-300">
+                                공식 DB
+                              </span>
+                            ) : null}
+                            {item.source === "cache" ? (
+                              <span className="shrink-0 rounded-full border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[9px] font-medium text-sky-700 dark:text-sky-300">
+                                캐시
+                              </span>
+                            ) : null}
+                            {item.isEstimated ? (
+                              <span className="shrink-0 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-700 dark:text-amber-300">
+                                예상 영양정보
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="text-[11px] text-muted-foreground tabular-nums">
+                            100g · {item.per100g.calories}kcal · 탄수{" "}
+                            {item.per100g.carbsG}g · 단백 {item.per100g.proteinG}g
+                          </p>
+                        </div>
+                        <span className="text-[11px] text-accent shrink-0">
+                          {selecting
+                            ? item.source === "official"
+                              ? "불러오는 중…"
+                              : "저장 중…"
+                            : "선택"}
+                        </span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </>
+          ) : null}
+
+          {!externalLoading && externalError && externalResults.length === 0 ? (
+            <p className="text-[12px] text-muted-foreground text-center py-2">
+              {externalError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {query.trim() && !fiberSearch ? (
+        <div className="rounded-xl border border-dashed border-border/60 px-3 py-3">
+          <p className="text-[11px] font-semibold text-muted-foreground px-1 mb-2">
+            직접 추가
+          </p>
+          <div className="text-center space-y-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-accent/30 text-accent hover:bg-accent/10"
+              onClick={() => openCreateCustomFood(query.trim())}
+            >
+              <Plus className="h-4 w-4 mr-1" />「{query.trim()}」직접 추가하기
+            </Button>
+            <p className="text-[10px] text-muted-foreground leading-relaxed">
+              원하는 음식이 없으면 영양성분표(100g 기준)를 입력해 저장할 수 있어요.
+            </p>
+          </div>
+        </div>
       ) : null}
 
       <FoodCartList
@@ -1234,6 +1698,11 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
               entries={foodLog.entries}
               targets={targets}
               onSelectFood={openDetail}
+              onSelectLogEntry={openLogEntryDetail}
+              onRemoveLogEntry={handleRemoveLogEntry}
+              inlineAddSlotId={inlineAddSlotId}
+              onToggleInlineAdd={handleToggleInlineAdd}
+              onPickFoodForSlot={handlePickFoodForSlot}
               clearAllUndoAvailable={Boolean(clearAllUndoSnapshot)}
               onClearAllOrUndo={handleClearAllOrUndoFoodLog}
               mealSlotUndoAvailable={mealSlotUndoAvailable}
@@ -1251,10 +1720,58 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
         }}
         food={selectedFood}
         targets={targets}
+        defaultMealSlot={inlineAddSlotId}
         onAddToCart={handleAddToCart}
         recommendedMenuContext={recommendedMenuEdit}
-        onApplyToRecommendedMenu={(servingCount) => {
+        onApplyToRecommendedMenu={({ servingCount, mealSlotId }) => {
           if (!recommendedMenuEdit || !selectedFood) return
+
+          if (recommendedMenuEdit.source === "api") {
+            const slot = (mealSlotId ?? recommendedMenuEdit.slotId) as MealSlotId
+            const combo = recommendedMenuEdit.combo
+            const pieceWeight = getPieceWeightG(selectedFood) ?? 100
+            const grams = gramsForServingCount(selectedFood, servingCount, pieceWeight)
+            const appliedNutrition = nutritionAtGrams(selectedFood, grams)
+
+            const recContext = combo
+              ? buildRecommendationContext(combo)
+              : undefined
+
+            addFoodLogEntries([
+              {
+                foodId: selectedFood.id,
+                name: selectedFood.name,
+                grams,
+                displayAmount: formatFullFoodPortion(
+                  selectedFood,
+                  servingCount,
+                  pieceWeight
+                ),
+                servingCount,
+                scope: "meal",
+                scopeLabel: combo
+                  ? `${combo.title} · ${mealSlotLabel(slot)}`
+                  : mealSlotLabel(slot),
+                mealSlotId: slot,
+                recommendationContext: recContext
+                  ? { ...recContext, applyMealSlotId: slot as FoodMealSlotId }
+                  : undefined,
+                nutrition: {
+                  calories: appliedNutrition.calories,
+                  carbsG: appliedNutrition.carbsG,
+                  proteinG: appliedNutrition.proteinG,
+                  fatG: appliedNutrition.fatG,
+                  sodiumMg: appliedNutrition.sodiumMg,
+                  sugarG: appliedNutrition.sugarG,
+                  fiberG: appliedNutrition.fiberG,
+                },
+              },
+            ])
+            setFoodLog(loadTodayFoodLog())
+            setRecommendedMenuEdit(null)
+            return
+          }
+
           recommendedMenuRef.current?.applyMenuItem(
             recommendedMenuEdit.slotId,
             recommendedMenuEdit.itemIndex,
@@ -1275,6 +1792,32 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
         }
       />
 
+      <FoodEntryDetailDialog
+        open={logEntryDetailOpen}
+        onOpenChange={(open) => {
+          setLogEntryDetailOpen(open)
+          if (!open) setLogEntryDetail(null)
+        }}
+        item={logEntryDetailItem}
+        onAdjustServing={(id, delta) => {
+          adjustFoodLogServingCount(id, delta)
+          setFoodLog(loadTodayFoodLog())
+        }}
+        onChangeMealSlot={(id, slotId) => {
+          updateFoodLogMealSlot(id, slotId)
+          setFoodLog(loadTodayFoodLog())
+        }}
+        onEditNutrition={(foodId) => openNutritionOverride(foodId)}
+        showDismissActions
+        onAddMenu={() => {
+          const slot = logEntryDetail?.mealSlotId
+          if (!slot) return
+          setLogEntryDetailOpen(false)
+          setLogEntryDetail(null)
+          setInlineAddSlotId(slot as FoodMealSlotId)
+        }}
+      />
+
       <FoodNutritionOverrideDialog
         open={overrideDialogOpen}
         onOpenChange={setOverrideDialogOpen}
@@ -1293,6 +1836,64 @@ export function FoodSearchPanel({ targets }: { targets: MacroTargets }) {
         onSaved={handleCustomFoodSaved}
         onDeleted={handleCustomFoodDeleted}
       />
+
+      <AlertDialog
+        open={Boolean(pendingComboApply)}
+        onOpenChange={(open) => {
+          if (!open) setPendingComboApply(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>추천 끼니 확인</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingComboApply
+                ? mismatchSuggestionMessage(
+                    pendingComboApply.combo,
+                    pendingComboApply.applySlot
+                  )
+                : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="flex-col sm:flex-row gap-2">
+            <AlertDialogCancel>취소</AlertDialogCancel>
+            {pendingComboApply ? (
+              <>
+                <AlertDialogAction
+                  onClick={() => {
+                    applyComboToFoodLog(
+                      pendingComboApply.combo,
+                      pendingComboApply.combo.applyMealSlotId,
+                      true
+                    )
+                    setPendingComboApply(null)
+                  }}
+                >
+                  {labelForIntendedMealSlot(
+                    pendingComboApply.combo.intendedMealSlot === "snack" ||
+                      pendingComboApply.combo.intendedMealSlot === "preWorkout"
+                      ? pendingComboApply.combo.intendedMealSlot
+                      : "dinner"
+                  )}
+                  에 적용
+                </AlertDialogAction>
+                <AlertDialogAction
+                  onClick={() => {
+                    applyComboToFoodLog(
+                      pendingComboApply.combo,
+                      pendingComboApply.applySlot,
+                      true
+                    )
+                    setPendingComboApply(null)
+                  }}
+                >
+                  그래도 {mealSlotLabel(pendingComboApply.applySlot)}에 적용
+                </AlertDialogAction>
+              </>
+            ) : null}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

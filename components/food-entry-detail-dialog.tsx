@@ -121,6 +121,8 @@ export function FoodEntryDetailDialog({
   onAdjustServing,
   onChangeMealSlot,
   onEditNutrition,
+  onAddMenu,
+  showDismissActions = false,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -128,6 +130,10 @@ export function FoodEntryDetailDialog({
   onAdjustServing: (id: string, delta: number) => void
   onChangeMealSlot?: (id: string, slotId: MealSlotId) => void
   onEditNutrition?: (foodId: string) => void
+  /** true면 「적용 안 함」+「변경」 (닫기만, 식단에서 제거하지 않음) */
+  showDismissActions?: boolean
+  /** 같은 끼니에 음식 추가 */
+  onAddMenu?: () => void
 }) {
   const [expandedNutrient, setExpandedNutrient] = useState<string | null>(null)
 
@@ -292,15 +298,43 @@ export function FoodEntryDetailDialog({
             </div>
           ) : null}
 
-          <div className="flex justify-center pt-1">
+          <div className="flex gap-2 pt-1">
+            {showDismissActions ? (
+              <Button
+                type="button"
+                variant="ghost"
+                className="flex-1"
+                onClick={() => onOpenChange(false)}
+              >
+                적용 안 함
+              </Button>
+            ) : null}
             <Button
               type="button"
-              className="min-w-[120px] bg-accent text-accent-foreground hover:bg-accent/90"
+              className={cn(
+                "bg-accent text-accent-foreground hover:bg-accent/90",
+                showDismissActions ? "flex-1" : "min-w-[120px]"
+              )}
               onClick={() => onOpenChange(false)}
             >
-              확인
+              변경
             </Button>
           </div>
+
+          {onAddMenu ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full border-accent/30 text-accent hover:bg-accent/10"
+              onClick={() => {
+                onOpenChange(false)
+                onAddMenu()
+              }}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1" />
+              메뉴 추가
+            </Button>
+          ) : null}
         </div>
       </DialogContent>
     </Dialog>

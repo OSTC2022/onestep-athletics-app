@@ -5,9 +5,13 @@ import { getFiberPer100g, toLoggedNutrition } from "@/lib/food-nutrition-utils"
 import { getFiberSearchResults } from "@/lib/food-recommendations"
 import type { DietWarningContext } from "@/lib/food-nutrition-utils"
 import { loadCustomFoods, searchCustomFoods } from "@/lib/custom-food-store"
+import { loadExternalFoods } from "@/lib/external-food-store"
+import { localizeFoodItem } from "@/lib/food-name-localize"
 import { applyFoodNutritionOverride } from "@/lib/food-nutrition-overrides"
+import { searchFoodDatabaseRanked } from "@/lib/food-search"
 
 export { getFiberPer100g } from "@/lib/food-nutrition-utils"
+export { getFoodDisplayName } from "@/lib/food-name-localize"
 
 export interface FoodNutritionPer100g {
   calories: number
@@ -25,6 +29,8 @@ export interface FoodDatabaseItem {
   name: string
   category: string
   aliases?: string[]
+  /** 영문 검색명 */
+  nameEn?: string
   /** '개' 등 count 단위 1회 무게(g) — food_items.piece_weight_g */
   pieceWeightG?: number
   /** @deprecated pieceWeightG 사용. 하위 호환용 */
@@ -36,6 +42,8 @@ export interface FoodDatabaseItem {
   refinedCarbLevel?: RefinedCarbLevel
   /** 사용자가 직접 추가한 음식 */
   isCustom?: boolean
+  /** 외부 API에서 가져온 음식 (캐시) */
+  isExternal?: boolean
 }
 
 export type RefinedCarbLevel = "low" | "medium" | "high"
@@ -121,52 +129,15 @@ const FOODS: FoodDatabaseItem[] = FOOD_DATABASE_ITEMS
 
 function getSearchableFoods(): FoodDatabaseItem[] {
   if (typeof window === "undefined") return FOODS
-  return [...loadCustomFoods(), ...FOODS]
+  return [...loadCustomFoods(), ...loadExternalFoods(), ...FOODS]
 }
 
-function scoreFoodMatch(
-  food: FoodDatabaseItem,
-  q: string,
-  categoryTargets?: string[]
-): number {
-  const name = food.name.toLowerCase()
-  const aliases = (food.aliases ?? []).map((a) => a.toLowerCase())
-  let score = 0
-
-  if (name === q) score = 100
-  else if (name.startsWith(q)) score = 80
-  else if (name.includes(q)) score = 60
-  else if (aliases.some((a) => a === q)) score = 70
-  else if (aliases.some((a) => a.startsWith(q))) score = 55
-  else if (aliases.some((a) => a.includes(q))) score = 45
-  else if (categoryTargets?.includes(food.category)) score = 35
-  else if (food.category.includes(q)) score = 20
-
-  if (food.isCustom && score > 0) score += 5
-
-  return score
-}
-
-/** 검색어 → 해당 카테고리 음식 일괄 매칭 */
-const CATEGORY_SEARCH: Record<string, string[]> = {
-  과일: ["과일"],
-  곡물: ["곡물"],
-  잡곡: ["곡물"],
-  탄수: ["탄수", "곡물"],
-  채소: ["채소"],
-  야채: ["채소"],
-  단백: ["단백"],
-  단백질: ["단백"],
-  지방: ["지방"],
-  견과: ["지방"],
-  반찬: ["반찬"],
-  식사: ["식사"],
-  간식: ["간식"],
-  음료: ["음료"],
-  밥: ["곡물"],
-  면: ["탄수"],
-  빵: ["탄수"],
-}
+export type { FoodSearchResponse } from "@/lib/food-search"
+export type {
+  FoodSearchResultItem,
+  FoodSearchResultSource,
+} from "@/lib/food-search-encyclopedia"
+export { normalizeFoodSearchQuery } from "@/lib/korean-food-search-normalizer"
 
 const FIBER_SEARCH_TERMS = ["식이섬유", "섬유질", "dietary fiber", "fiber"] as const
 
@@ -177,30 +148,59 @@ export function isFiberSearchQuery(query: string): boolean {
   )
 }
 
-export function searchFoodDatabase(
+export function searchFoodDatabaseDetailed(
   query: string,
-  limit = 24,
+  limit = 40,
   warningContext?: DietWarningContext
-): FoodDatabaseItem[] {
-  const q = query.trim().toLowerCase()
-  if (!q) return []
-
-  if (isFiberSearchQuery(q)) {
-    return getFiberSearchResults(limit, warningContext)
+) {
+  const q = query.trim()
+  if (!q) {
+    return {
+      items: [],
+      similarItems: [],
+      fallbackExternalQueries: [],
+      exact: [],
+      similar: [],
+    }
   }
 
-  const categoryTargets = CATEGORY_SEARCH[q]
-  const searchableFoods = getSearchableFoods()
+  if (isFiberSearchQuery(q)) {
+    const items = getFiberSearchResults(limit, warningContext)
+    return {
+      items,
+      similarItems: [] as FoodDatabaseItem[],
+      fallbackExternalQueries: [],
+      exact: items.map((food) => ({
+        food,
+        source: "local" as const,
+        score: 100,
+      })),
+      similar: [],
+    }
+  }
 
-  const scored = searchableFoods
-    .map((food) => ({
-      food,
-      score: scoreFoodMatch(food, q, categoryTargets),
-    }))
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score || a.food.name.localeCompare(b.food.name, "ko"))
+  const resolved = searchFoodDatabaseRanked(getSearchableFoods(), q, limit)
+  return {
+    items: resolved.items.map((food) => resolveFoodRecord(food)),
+    similarItems: resolved.similarItems.map((food) => resolveFoodRecord(food)),
+    fallbackExternalQueries: resolved.fallbackExternalQueries,
+    exact: resolved.exact.map((r) => ({
+      ...r,
+      food: resolveFoodRecord(r.food),
+    })),
+    similar: resolved.similar.map((r) => ({
+      ...r,
+      food: resolveFoodRecord(r.food),
+    })),
+  }
+}
 
-  return scored.slice(0, limit).map((x) => resolveFoodRecord(x.food))
+export function searchFoodDatabase(
+  query: string,
+  limit = 40,
+  warningContext?: DietWarningContext
+): FoodDatabaseItem[] {
+  return searchFoodDatabaseDetailed(query, limit, warningContext).items
 }
 
 export function getCustomFoodSearchResults(query: string, limit = 24): FoodDatabaseItem[] {
@@ -215,7 +215,8 @@ function resolveFoodRecord(food: FoodDatabaseItem): FoodDatabaseItem {
     servingGrams: pieceWeightG,
   }
   if (food.isCustom) return normalized
-  return applyFoodNutritionOverride(normalized)
+  const withOverride = applyFoodNutritionOverride(normalized)
+  return localizeFoodItem(withOverride)
 }
 
 export function getFoodById(id: string): FoodDatabaseItem | undefined {
@@ -223,9 +224,18 @@ export function getFoodById(id: string): FoodDatabaseItem | undefined {
   if (typeof window !== "undefined" && id.startsWith("custom-")) {
     food =
       loadCustomFoods().find((f) => f.id === id) ?? FOODS.find((f) => f.id === id)
+  } else if (
+    typeof window !== "undefined" &&
+    (id.startsWith("external-") || id.startsWith("mfds:"))
+  ) {
+    food =
+      loadExternalFoods().find((f) => f.id === id) ??
+      FOODS.find((f) => f.id === id)
   } else {
     food =
-      FOODS.find((f) => f.id === id) ?? loadCustomFoods().find((f) => f.id === id)
+      FOODS.find((f) => f.id === id) ??
+      loadCustomFoods().find((f) => f.id === id) ??
+      loadExternalFoods().find((f) => f.id === id)
   }
   return food ? resolveFoodRecord(food) : undefined
 }

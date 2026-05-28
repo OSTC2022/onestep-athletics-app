@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { RefreshCw, Undo2 } from "lucide-react"
+import { RefreshCw, Undo2, X, Plus } from "lucide-react"
 import { Progress } from "@/components/ui/progress"
 import { CollapsibleInlineSection } from "@/components/collapsible-card"
 import { MacroRangeLabel } from "@/components/macro-range-label"
@@ -14,6 +14,9 @@ import {
 } from "@/lib/meal-slot-targets"
 import {
   evaluateMealNutrition,
+  type MealNutritionEvaluationContext,
+} from "@/lib/nutrition-evaluation"
+import {
   macroStatusColor,
   mealStatusBorderColor,
   type MacroEval,
@@ -31,6 +34,7 @@ import {
 } from "@/lib/food-nutrition-utils"
 import { getFoodRecommendationsForJudgment } from "@/lib/food-recommendations"
 import type { FoodDatabaseItem } from "@/lib/food-database"
+import { MealSlotInlineFoodSearch } from "@/components/meal-slot-inline-food-search"
 import { cn } from "@/lib/utils"
 import type { LoggedFoodEntry } from "@/lib/daily-food-log"
 import { MEAL_SLOTS } from "@/lib/nutrition"
@@ -212,6 +216,55 @@ function MacroRow({
   )
 }
 
+function MealEntryList({
+  entries,
+  onSelectEntry,
+  onRemoveEntry,
+}: {
+  entries: LoggedFoodEntry[]
+  onSelectEntry?: (entry: LoggedFoodEntry) => void
+  onRemoveEntry?: (entry: LoggedFoodEntry) => void
+}) {
+  return (
+    <ul className="space-y-1">
+      {entries.map((entry) => (
+        <li key={entry.id}>
+          <div className="relative rounded-lg border border-border/40 bg-secondary/15 hover:border-accent/30 transition-colors">
+            {onRemoveEntry ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRemoveEntry(entry)
+                }}
+                className="absolute top-1 right-1 z-10 flex h-5 w-5 items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                aria-label={`${entry.name} 삭제`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => onSelectEntry?.(entry)}
+              className="w-full px-2 py-1.5 pr-7 text-left hover:bg-accent/5 rounded-lg transition-colors"
+            >
+              <p className="text-[11px] font-medium leading-snug">{entry.name}</p>
+              <p className="text-[10px] text-muted-foreground tabular-nums mt-0.5">
+                {entry.displayAmount} · {formatCalories(entry.nutrition.calories)}kcal
+              </p>
+              <p className="text-[9px] text-muted-foreground/80 tabular-nums mt-0.5">
+                탄수 {formatMacroG(entry.nutrition.carbsG)}g · 단백{" "}
+                {formatMacroG(entry.nutrition.proteinG)}g · 지방{" "}
+                {formatMacroG(entry.nutrition.fatG)}g
+              </p>
+            </button>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 function PerMealSummaryCard({
   slotId,
   label,
@@ -221,6 +274,13 @@ function PerMealSummaryCard({
   coachingContext,
   undoAvailable = false,
   onClearOrUndo,
+  onSelectEntry,
+  onRemoveEntry,
+  inlineAddOpen = false,
+  onToggleInlineAdd,
+  onPickFoodForSlot,
+  searchTargets,
+  allLogEntries = [],
 }: {
   slotId?: FoodMealSlotId
   label: string
@@ -230,21 +290,26 @@ function PerMealSummaryCard({
   coachingContext?: MealEvaluationContext
   undoAvailable?: boolean
   onClearOrUndo?: () => void
+  onSelectEntry?: (entry: LoggedFoodEntry) => void
+  onRemoveEntry?: (entry: LoggedFoodEntry) => void
+  inlineAddOpen?: boolean
+  onToggleInlineAdd?: (slotId: FoodMealSlotId) => void
+  onPickFoodForSlot?: (food: FoodDatabaseItem, slotId: FoodMealSlotId) => void
+  searchTargets?: MacroTargets
+  allLogEntries?: LoggedFoodEntry[]
 }) {
+  const [showGraph, setShowGraph] = useState(false)
   const nextMeal = slotId ? NEXT_MEAL_SLOT[slotId] : undefined
-  const evaluation = useMemo(
-    () =>
-      evaluateMealNutrition(
-        nutrition,
-        slotTargets,
-        mealEntries,
-        slotId ?? "breakfast",
-        label,
-        nextMeal?.label,
-        coachingContext
-      ),
-    [nutrition, slotTargets, mealEntries, slotId, label, nextMeal?.label, coachingContext]
-  )
+  const evaluation = useMemo(() => {
+    const ctx: MealNutritionEvaluationContext = {
+      mealSlot: slotId ?? "breakfast",
+      slotLabel: label,
+      defaultTargets: slotTargets,
+      coachingMode: coachingContext?.coachingMode ?? null,
+      nextMealLabel: nextMeal?.label,
+    }
+    return evaluateMealNutrition(nutrition, mealEntries, ctx)
+  }, [nutrition, slotTargets, mealEntries, slotId, label, nextMeal?.label, coachingContext])
 
   const calories = evaluation.macros.find((m) => m.key === "calories")
   const carbs = evaluation.macros.find((m) => m.key === "carbs")
@@ -255,13 +320,18 @@ function PerMealSummaryCard({
   const sodium = evaluation.macros.find((m) => m.key === "sodium")
 
   const statusLabel =
-    evaluation.overallStatus === "good"
+    evaluation.displayStatusLabel ??
+    (evaluation.overallStatus === "good"
       ? "양호"
       : evaluation.overallStatus === "caution"
         ? "주의"
         : evaluation.overallStatus === "bad"
           ? "개선 필요"
-          : "기록 없음"
+          : "기록 없음")
+
+  const targetCalLabel = evaluation.usesRecommendationCriteria
+    ? `${Math.round(evaluation.recommendationContext!.targetRange.calories.min)}~${Math.round(evaluation.recommendationContext!.targetRange.calories.max)}`
+    : formatCalories(slotTargets.calories)
 
   const statusColor =
     evaluation.overallStatus === "good"
@@ -272,6 +342,10 @@ function PerMealSummaryCard({
           ? "text-red-400"
           : "text-muted-foreground"
 
+  const toggleGraph = () => {
+    if (nutrition.count > 0) setShowGraph((prev) => !prev)
+  }
+
   return (
     <div
       className={cn(
@@ -279,19 +353,74 @@ function PerMealSummaryCard({
         mealStatusBorderColor(evaluation.overallStatus)
       )}
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <p className="text-[12px] font-semibold text-accent">{label}</p>
-          <span className={cn("text-[10px] font-medium", statusColor)}>
-            {statusLabel}
+      <button
+        type="button"
+        onClick={toggleGraph}
+        disabled={nutrition.count === 0}
+        className={cn(
+          "w-full text-left space-y-1 rounded-lg transition-colors",
+          nutrition.count > 0 && "hover:bg-secondary/25 -mx-1 px-1 py-0.5"
+        )}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <p className="text-[12px] font-semibold text-accent">{label}</p>
+            <span className={cn("text-[10px] font-medium", statusColor)}>
+              {statusLabel}
+            </span>
+          </div>
+          <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+            {nutrition.count}개 · 목표 {targetCalLabel}kcal
           </span>
         </div>
-        <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
-          {nutrition.count}개 · 목표 {formatCalories(slotTargets.calories)}kcal
-        </span>
-      </div>
+        {nutrition.count > 0 ? (
+          <p className="text-[9px] text-accent/70">
+            {showGraph ? "탭하여 음식 목록 보기" : "탭하여 영양 그래프 보기"}
+          </p>
+        ) : null}
+      </button>
 
-      {nutrition.count > 0 ? (
+      {nutrition.count > 0 && showGraph && evaluation.recommendationContext ? (
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
+            {evaluation.recommendationContext.evaluationBadgeLabel}
+          </span>
+          {evaluation.usesRecommendationCriteria ? (
+            <span className="text-[9px] text-muted-foreground">
+              추천 식단 기준 평가
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {nutrition.count > 0 && !showGraph ? (
+        <MealEntryList
+          entries={mealEntries}
+          onSelectEntry={onSelectEntry}
+          onRemoveEntry={onRemoveEntry}
+        />
+      ) : null}
+
+      {!showGraph && slotId && inlineAddOpen && searchTargets && onPickFoodForSlot ? (
+        <MealSlotInlineFoodSearch
+          slotLabel={label}
+          targets={searchTargets}
+          logEntries={allLogEntries}
+          onClose={() => onToggleInlineAdd?.(slotId)}
+          onSelectFood={(food) => onPickFoodForSlot(food, slotId)}
+        />
+      ) : !showGraph && slotId && onToggleInlineAdd ? (
+        <button
+          type="button"
+          onClick={() => onToggleInlineAdd(slotId)}
+          className="w-full h-8 rounded-lg border border-dashed border-accent/35 bg-accent/5 text-[10px] font-medium text-accent hover:bg-accent/10 transition-colors inline-flex items-center justify-center gap-1"
+        >
+          <Plus className="h-3 w-3" />
+          메뉴 추가
+        </button>
+      ) : null}
+
+      {nutrition.count > 0 && showGraph ? (
         <>
           {calories ? (
             <MacroRow macro={calories} unit="kcal" formatValue={formatCalories} />
@@ -404,9 +533,11 @@ function PerMealSummaryCard({
             </div>
           ) : null}
         </>
-      ) : (
+      ) : null}
+
+      {nutrition.count === 0 ? (
         <p className="text-[10px] text-muted-foreground">아직 기록이 없어요.</p>
-      )}
+      ) : null}
 
       {slotId && onClearOrUndo ? (
         <button
@@ -585,6 +716,11 @@ export function NutritionDailySummary({
   entries,
   targets,
   onSelectFood,
+  onSelectLogEntry,
+  onRemoveLogEntry,
+  inlineAddSlotId,
+  onToggleInlineAdd,
+  onPickFoodForSlot,
   onClearAllOrUndo,
   clearAllUndoAvailable = false,
   onClearOrUndoMealSlot,
@@ -593,6 +729,11 @@ export function NutritionDailySummary({
   entries: LoggedFoodEntry[]
   targets: MacroTargets
   onSelectFood?: (food: FoodDatabaseItem) => void
+  onSelectLogEntry?: (entry: LoggedFoodEntry) => void
+  onRemoveLogEntry?: (entry: LoggedFoodEntry) => void
+  inlineAddSlotId?: FoodMealSlotId | null
+  onToggleInlineAdd?: (slotId: FoodMealSlotId) => void
+  onPickFoodForSlot?: (food: FoodDatabaseItem, slotId: FoodMealSlotId) => void
   onClearAllOrUndo?: () => void
   clearAllUndoAvailable?: boolean
   onClearOrUndoMealSlot?: (slotId: FoodMealSlotId, label: string) => void
@@ -732,6 +873,13 @@ export function NutritionDailySummary({
               slotTargets={mealSlotTargets[slot.id as FoodMealSlotId]}
               mealEntries={mealEntries.grouped[slot.id as FoodMealSlotId]}
               coachingContext={coachingContext}
+              onSelectEntry={onSelectLogEntry}
+              onRemoveEntry={onRemoveLogEntry}
+              inlineAddOpen={inlineAddSlotId === slot.id}
+              onToggleInlineAdd={onToggleInlineAdd}
+              onPickFoodForSlot={onPickFoodForSlot}
+              searchTargets={targets}
+              allLogEntries={entries}
               undoAvailable={Boolean(
                 mealSlotUndoAvailable?.[slot.id as FoodMealSlotId]
               )}
@@ -751,6 +899,7 @@ export function NutritionDailySummary({
                 slotTargets={mealSlotTargets.lunch}
                 mealEntries={mealEntries.unassigned}
                 coachingContext={coachingContext}
+                onSelectEntry={onSelectLogEntry}
               />
             </div>
           ) : null}

@@ -17,6 +17,7 @@ import type { NutritionProfile } from "@/lib/nutrition"
 import { WEIGHT_TRACKER_EVENT } from "@/lib/nutrition"
 import {
   calculateDailyWaterTarget,
+  DEFAULT_USER_PROFILE,
   formatCalories,
   loadUserProfile,
   USER_PROFILE_EVENT,
@@ -122,10 +123,9 @@ export function NutritionTodayPanel({
   const waterTarget = useMemo(() => {
     void profileVersion
     if (!hydrated) {
-      const user = loadUserProfile()
       return calculateDailyWaterTarget(
-        profile.currentWeightKg || user.currentWeightKg,
-        user.dietMode
+        profile.currentWeightKg || DEFAULT_USER_PROFILE.currentWeightKg,
+        DEFAULT_USER_PROFILE.dietMode
       )
     }
     const user = withActiveWeight(loadUserProfile())
