@@ -14,28 +14,50 @@ function missingVars(names: string[]): string {
   return names.join(", ")
 }
 
+/** 사용자에게 보여줄 안내 (배포·로컬 공통) */
+export const SUPABASE_RECOMMENDATION_USER_MESSAGE =
+  "추천 데이터를 불러오는 중 문제가 발생했습니다.\n관리자에게 문의해주세요."
+
+export const SUPABASE_SEARCH_USER_MESSAGE =
+  "공식 음식 검색을 일시적으로 사용할 수 없어요. 직접 추가하거나 잠시 후 다시 시도해 주세요."
+
+export function getSupabaseServerUserMessage(): string {
+  return SUPABASE_RECOMMENDATION_USER_MESSAGE
+}
+
+/** 서버 로그·운영자용 (사용자 UI에 노출하지 않음) */
+export function resolveSupabaseServerUrl(): string | undefined {
+  return (
+    process.env.SUPABASE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
+    undefined
+  )
+}
+
 export function isSupabaseServerConfigured(): boolean {
   return Boolean(
-    process.env.SUPABASE_URL?.trim() &&
+    resolveSupabaseServerUrl() &&
       process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
   )
 }
 
 export function getSupabaseServerConfigError(): string | null {
   const missing: string[] = []
-  if (!process.env.SUPABASE_URL?.trim()) missing.push("SUPABASE_URL")
+  if (!resolveSupabaseServerUrl()) {
+    missing.push("SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL)")
+  }
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
     missing.push("SUPABASE_SERVICE_ROLE_KEY")
   }
   if (missing.length === 0) return null
-  return `Supabase 서버 설정이 필요합니다. .env.local에 ${missingVars(missing)}을(를) 추가하세요. (service role key는 서버 전용)`
+  return `[Supabase server] Missing env: ${missingVars(missing)}. Set in .env.local (dev) or Vercel Environment Variables (production). Do not use NEXT_PUBLIC_ for SERVICE_ROLE_KEY.`
 }
 
 export function assertSupabaseServerEnv(): {
   url: string
   serviceRoleKey: string
 } {
-  const url = process.env.SUPABASE_URL?.trim()
+  const url = resolveSupabaseServerUrl()
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
 
   if (!url || !serviceRoleKey) {
@@ -64,7 +86,7 @@ export function getSupabasePublicConfigError(): string | null {
     missing.push("NEXT_PUBLIC_SUPABASE_ANON_KEY")
   }
   if (missing.length === 0) return null
-  return `Supabase 클라이언트 설정이 필요합니다. .env.local에 ${missingVars(missing)}을(를) 추가하세요. (anon key는 Dashboard → Project Settings → API → anon public)`
+  return `Supabase 클라이언트 설정이 필요합니다. Dashboard → API → anon public 키를 확인해 주세요.`
 }
 
 export function assertSupabasePublicEnv(): {

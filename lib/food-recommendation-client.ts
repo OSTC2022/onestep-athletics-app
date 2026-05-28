@@ -6,6 +6,7 @@ import {
   inferDefaultStrategySettings,
   type NutritionStrategySettings,
 } from "@/lib/food-recommendation-strategy"
+import { SUPABASE_RECOMMENDATION_USER_MESSAGE } from "@/lib/supabase-env"
 
 type ApiResponse = RecommendFoodsResponse & {
   error?: string
@@ -50,12 +51,20 @@ export async function fetchFoodRecommendations(
   const json = (await res.json()) as ApiResponse
 
   if (!res.ok) {
+    const message =
+      json.message ??
+      (json.error === "supabase_unconfigured" || res.status === 503
+        ? SUPABASE_RECOMMENDATION_USER_MESSAGE
+        : undefined) ??
+      (typeof json.error === "string" &&
+      !json.error.includes("SUPABASE") &&
+      !json.error.includes(".env")
+        ? json.error
+        : undefined) ??
+      "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요."
     return {
       data: null,
-      message:
-        json.message ??
-        json.error ??
-        "현재 조건에 맞는 추천을 찾지 못했습니다. 조건을 조금 완화해서 다시 추천해볼게요.",
+      message,
     }
   }
 

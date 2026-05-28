@@ -3,6 +3,7 @@ import { generateFoodRecommendations } from "@/lib/food-recommendation-engine"
 import type { RecommendFoodsRequest } from "@/lib/food-recommendation-types"
 import {
   getSupabaseServerConfigError,
+  getSupabaseServerUserMessage,
   isSupabaseServerConfigured,
 } from "@/lib/supabase-env"
 
@@ -22,11 +23,11 @@ const EMPTY_CONSUMED = {
  */
 export async function POST(request: Request) {
   if (!isSupabaseServerConfigured()) {
+    console.error("[recommend-foods]", getSupabaseServerConfigError())
     return NextResponse.json(
       {
-        error:
-          getSupabaseServerConfigError() ??
-          "Supabase 서버 설정이 필요합니다.",
+        error: "supabase_unconfigured",
+        message: getSupabaseServerUserMessage(),
         recommendations: [],
       },
       { status: 503 }

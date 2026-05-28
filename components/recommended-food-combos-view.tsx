@@ -306,7 +306,7 @@ export function NutritionRecommendationPanel({
 
       {error && !response?.recommendations.length ? (
         <div className="text-center space-y-2 py-3 rounded-xl border border-border/40 bg-secondary/10 px-3">
-          <p className="text-[12px] text-muted-foreground leading-relaxed">{error}</p>
+          <p className="text-[12px] text-muted-foreground leading-relaxed whitespace-pre-line">{error}</p>
           <Button type="button" size="sm" variant="outline" onClick={onRefresh}>
             <RefreshCw className="h-3.5 w-3.5 mr-1" />
             다시 추천받기

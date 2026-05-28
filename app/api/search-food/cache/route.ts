@@ -5,6 +5,7 @@ import {
   upsertExternalFoodCache,
 } from "@/lib/external-food-cache-db"
 import { isSupabaseConfigured, getSupabaseServerConfigError } from "@/lib/supabase-server"
+import { SUPABASE_SEARCH_USER_MESSAGE } from "@/lib/supabase-env"
 
 /**
  * POST /api/search-food/cache
@@ -14,11 +15,11 @@ import { isSupabaseConfigured, getSupabaseServerConfigError } from "@/lib/supaba
  */
 export async function POST(request: Request) {
   if (!isSupabaseConfigured()) {
+    console.error("[search-food/cache]", getSupabaseServerConfigError())
     return NextResponse.json(
       {
-        error:
-          getSupabaseServerConfigError() ??
-          "Supabase가 설정되지 않았습니다.",
+        error: "supabase_unconfigured",
+        message: SUPABASE_SEARCH_USER_MESSAGE,
       },
       { status: 503 }
     )
