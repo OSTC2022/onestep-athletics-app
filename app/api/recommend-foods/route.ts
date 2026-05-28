@@ -4,7 +4,7 @@ import type { RecommendFoodsRequest } from "@/lib/food-recommendation-types"
 import {
   getSupabaseServerConfigError,
   getSupabaseServerUserMessage,
-  isSupabaseServerConfigured,
+  isSupabaseReadConfigured,
 } from "@/lib/supabase-env"
 
 const EMPTY_CONSUMED = {
@@ -22,7 +22,7 @@ const EMPTY_CONSUMED = {
  * 목표·훈련·식사 타이밍 기반 영양 전략 추천 (Supabase food_items, 서버 전용)
  */
 export async function POST(request: Request) {
-  if (!isSupabaseServerConfigured()) {
+  if (!isSupabaseReadConfigured()) {
     console.error("[recommend-foods]", getSupabaseServerConfigError())
     return NextResponse.json(
       {

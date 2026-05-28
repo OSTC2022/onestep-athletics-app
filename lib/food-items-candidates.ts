@@ -3,7 +3,7 @@ import type {
   FoodCandidate,
   RecommendationBucket,
 } from "@/lib/food-recommendation-types"
-import { getSupabaseAdmin } from "@/lib/supabase-server"
+import { getSupabaseReadClient } from "@/lib/supabase-server"
 import { proteinVariant } from "@/lib/food-recommendation-strategy"
 
 type FoodItemRow = {
@@ -83,7 +83,7 @@ async function fetchByKeywords(
   keywords: string[],
   limit: number
 ): Promise<FoodItemRow[]> {
-  const supabase = getSupabaseAdmin()
+  const supabase = getSupabaseReadClient()
   if (!supabase || keywords.length === 0) return []
 
   const filters = keywords

@@ -43,11 +43,14 @@ export function isSupabaseServerConfigured(): boolean {
 
 export function getSupabaseServerConfigError(): string | null {
   const missing: string[] = []
-  if (!resolveSupabaseServerUrl()) {
-    missing.push("SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL)")
+  if (!resolveSupabaseServerUrl() && !process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()) {
+    missing.push("NEXT_PUBLIC_SUPABASE_URL (or SUPABASE_URL)")
   }
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
-    missing.push("SUPABASE_SERVICE_ROLE_KEY")
+  if (
+    !process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() &&
+    !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()
+  ) {
+    missing.push("NEXT_PUBLIC_SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY)")
   }
   if (missing.length === 0) return null
   return `[Supabase server] Missing env: ${missingVars(missing)}. Set in .env.local (dev) or Vercel Environment Variables (production). Do not use NEXT_PUBLIC_ for SERVICE_ROLE_KEY.`
@@ -75,6 +78,11 @@ export function isSupabasePublicConfigured(): boolean {
     process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() &&
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim()
   )
+}
+
+/** food_items 읽기 — service role 또는 anon(public) 키 */
+export function isSupabaseReadConfigured(): boolean {
+  return isSupabaseServerConfigured() || isSupabasePublicConfigured()
 }
 
 export function getSupabasePublicConfigError(): string | null {

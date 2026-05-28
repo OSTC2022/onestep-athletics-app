@@ -1,7 +1,7 @@
 import type { FoodNutritionPer100g } from "@/lib/food-database"
 import type { ExternalFoodSearchResult } from "@/lib/external-food-types"
 import { normalizeFoodSearchQuery } from "@/lib/korean-food-search-normalizer"
-import { getSupabaseAdmin } from "@/lib/supabase-server"
+import { getSupabaseReadClient } from "@/lib/supabase-server"
 
 type FoodItemRow = {
   id: string
@@ -80,7 +80,7 @@ export async function searchFoodItems(
   query: string,
   limit = 20
 ): Promise<ExternalFoodSearchResult[]> {
-  const supabase = getSupabaseAdmin()
+  const supabase = getSupabaseReadClient()
   if (!supabase) return []
 
   const trimmed = query.trim()

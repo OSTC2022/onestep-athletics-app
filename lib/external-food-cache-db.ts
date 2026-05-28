@@ -5,7 +5,7 @@ import type {
 } from "@/lib/external-food-types"
 import { normalizeFoodSearchQuery } from "@/lib/food-search"
 import { localizeExternalFoodSearchResult, localizeFoodName } from "@/lib/food-name-localize"
-import { getSupabaseAdmin } from "@/lib/supabase-server"
+import { getSupabaseAdmin, getSupabaseReadClient } from "@/lib/supabase-server"
 
 type ExternalFoodCacheRow = {
   id: string
@@ -75,7 +75,7 @@ export async function searchExternalFoodCache(
   query: string,
   limit = 10
 ): Promise<ExternalFoodSearchResult[]> {
-  const supabase = getSupabaseAdmin()
+  const supabase = getSupabaseReadClient()
   if (!supabase) return []
 
   const normQuery = normalizeFoodSearchQuery(query)
